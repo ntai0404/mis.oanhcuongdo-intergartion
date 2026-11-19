@@ -1,0 +1,27 @@
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*token*.txt
+*token*.json
+
+# Dependencies
+node_modules/
+
+# Local personal context, operational records, private crawls/screenshots, exports, downloads, and legacy one-off scripts
+context/
+records/
+reports/
+exports/
+downloads/
+scripts/legacy/*.mjs
+
+# OS / editor / temporary noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.log

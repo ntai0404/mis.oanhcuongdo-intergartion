@@ -1,0 +1,20 @@
+{
+  "name": "mis-matrix-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Matrix AI EDU (mis.oanhcuongdo.com) using user Bearer token authentication",
+  "type": "module",
+  "main": "src/mcp-server.mjs",
+  "bin": {
+    "mis-matrix-mcp": "./src/mcp-server.mjs"
+  },
+  "scripts": {
+    "start": "node src/mcp-server.mjs",
+    "test": "node --test tests/mcp.test.mjs tests/workspace-contract.test.mjs",
+    "test:mcp": "node --test tests/mcp.test.mjs",
+    "test:contract": "node --test tests/workspace-contract.test.mjs",
+    "test:live-readonly": "node --test tests/live-readonly.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
