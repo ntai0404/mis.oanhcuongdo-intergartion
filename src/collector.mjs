@@ -726,3 +726,289 @@ export async function queryUserLogs(client, config, args = {}) {
     ...timeline
   };
 }
+
+function toVnDate(iso) {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return null;
+  const d = new Date(ms + 7 * 3600 * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+}
+
+function toVnTimestamp(iso) {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return null;
+  const d = new Date(ms + 7 * 3600 * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} +07:00`;
+}
+
+function isUserAssignedToTask(task, targetUser) {
+  if (!targetUser) return false;
+  if (targetUser.id && task.assignee_id === targetUser.id) return true;
+  for (const a of task.assignees || []) {
+    if (targetUser.id && a.id === targetUser.id) return true;
+    if (targetUser.email && a.email && a.email.toLowerCase() === targetUser.email.toLowerCase()) return true;
+  }
+  return false;
+}
+
+function summarizeTask(project, task, nowMs) {
+  const checklists = Array.isArray(task.checklists) ? task.checklists : [];
+  const doneChk = checklists.filter(c => c.is_completed).length;
+  const deadlineMs = task.deadline ? Date.parse(task.deadline) : NaN;
+  const isOverdue = task.status !== 'DONE' && !Number.isNaN(deadlineMs) && deadlineMs < nowMs;
+  return {
+    project_id: project.id || null,
+    project_name: project.name || null,
+    task_id: task.id || null,
+    title: task.title || '',
+    status: task.status || null,
+    deadline_utc: task.deadline || null,
+    deadline_vn: toVnTimestamp(task.deadline),
+    is_overdue: isOverdue,
+    is_claimable: Boolean(task.is_claimable),
+    checklist_progress: `${doneChk}/${checklists.length}`,
+    reports_count: (task.reports || []).length,
+    comments_count: (task.comments || []).length,
+    assignees: (task.assignees || []).map(a => a.full_name || a.email || a.id)
+  };
+}
+
+/**
+ * High-signal, read-only task query across accessible projects for natural Q&A:
+ * - Check-in / "today's tasks" (strictly separating TODO, IN_PROGRESS, IN_REVIEW, DONE, and claimable open tasks)
+ * - Specific date activity/completion lookup (`date_vn` in +07:00) backed strictly by direct timestamp evidence
+ */
+export async function queryMyTasks(client, config, args = {}) {
+  const nowMs = Date.now();
+  const dateVn = args.date_vn ? String(args.date_vn).trim() : null;
+  if (dateVn && !/^\d{4}-\d{2}-\d{2}$/.test(dateVn)) {
+    throw new MisApiError('INVALID_ARGUMENT', 'date_vn must be formatted as YYYY-MM-DD (Asia/Saigon +07:00)', 400);
+  }
+
+  const workspaceRoot = config.workspaceRoot ? path.resolve(config.workspaceRoot) : path.dirname(getExportsRoot(config));
+  let snapshot = null;
+  if (args.snapshot_path) {
+    const resolved = resolveConfinedPath(args.snapshot_path, workspaceRoot, 'snapshot_path');
+    if (!fs.existsSync(resolved)) {
+      throw new MisApiError('FILE_NOT_FOUND', `Snapshot file not found: ${resolved}`, 404);
+    }
+    const parsed = JSON.parse(fs.readFileSync(resolved, 'utf8'));
+    if (parsed.files?.fullSnapshot) {
+      const nested = resolveConfinedPath(parsed.files.fullSnapshot, workspaceRoot, 'snapshot_path');
+      snapshot = JSON.parse(fs.readFileSync(nested, 'utf8'));
+    } else {
+      snapshot = parsed;
+    }
+  }
+
+  let targetUser = null;
+  if (args.user_id || args.email) {
+    targetUser = { id: args.user_id || null, email: args.email || null, full_name: null, role: null };
+    if (!targetUser.id && args.email && !snapshot) {
+      try {
+        const lookedUp = await client.request('GET', '/api/v1/users/lookup', { query: { email: args.email } });
+        if (lookedUp?.id) {
+          targetUser = { id: lookedUp.id, email: lookedUp.email || args.email, full_name: lookedUp.full_name || null, role: lookedUp.role || null };
+        }
+      } catch {
+        // fallback to matching from project members/assignees
+      }
+    }
+  } else if (snapshot?.account?.me) {
+    const u = snapshot.account.me;
+    targetUser = { id: u.id || null, email: u.email || null, full_name: u.full_name || null, role: u.role || null };
+  } else {
+    const meRes = await client.request('GET', '/api/v1/auth/me');
+    const u = meRes?.user || meRes || {};
+    targetUser = { id: u.id || null, email: u.email || null, full_name: u.full_name || null, role: u.role || null };
+  }
+
+  const warnings = [];
+  let projectBundles;
+  if (snapshot) {
+    projectBundles = Array.isArray(snapshot.projects) ? snapshot.projects : [];
+    if (args.project_id) {
+      projectBundles = projectBundles.filter(b => b.project?.id === args.project_id);
+    }
+  } else {
+    let projectList = [];
+    if (args.project_id) {
+      const pid = assertSafeSegment(args.project_id, 'project_id');
+      const detail = await client.request('GET', `/api/v1/projects/${pid}`);
+      projectList = [detail || { id: args.project_id }];
+    } else {
+      const list = await client.request('GET', '/api/v1/projects/');
+      projectList = Array.isArray(list) ? list : [];
+    }
+
+    projectBundles = await mapLimit(projectList, 4, async proj => {
+      const pid = assertSafeSegment(proj.id, 'project_id');
+      const tasks = await safeGet(client, `/api/v1/projects/${pid}/tasks/`, {}, warnings, `project:${proj.id}:tasks`);
+      return {
+        project: proj,
+        members: [],
+        tasks: Array.isArray(tasks) ? tasks : []
+      };
+    });
+  }
+
+  targetUser = enrichTargetUserFromBundles(projectBundles, targetUser);
+
+  const byStatus = { TODO: 0, IN_PROGRESS: 0, INTERNAL_REVIEW: 0, MENTOR_REVIEW: 0, DONE: 0 };
+  const buckets = {
+    todo: [],
+    in_progress: [],
+    in_review: [],
+    done: [],
+    claimable_open: []
+  };
+
+  const includeDone = Boolean(args.include_done) || args.status === 'DONE';
+  const includeClaimable = args.include_claimable !== false;
+  let overdueNonDoneCount = 0;
+
+  const workedOnDate = [];
+  const completedOnDate = [];
+  const deadlineOnDate = [];
+
+  for (const bundle of projectBundles) {
+    const project = bundle.project || {};
+    for (const task of bundle.tasks || []) {
+      if (task.is_deleted) continue;
+      const assigned = isUserAssignedToTask(task, targetUser);
+      const summary = summarizeTask(project, task, nowMs);
+
+      if (assigned) {
+        if (byStatus[task.status] !== undefined) byStatus[task.status] += 1;
+        else byStatus[task.status] = 1;
+        if (summary.is_overdue) overdueNonDoneCount += 1;
+
+        if (!args.status || task.status === args.status) {
+          if (task.status === 'TODO') buckets.todo.push(summary);
+          else if (task.status === 'IN_PROGRESS') buckets.in_progress.push(summary);
+          else if (task.status === 'INTERNAL_REVIEW' || task.status === 'MENTOR_REVIEW') buckets.in_review.push(summary);
+          else if (task.status === 'DONE' && includeDone) buckets.done.push(summary);
+        }
+      } else if (includeClaimable && task.is_claimable && task.status !== 'DONE') {
+        buckets.claimable_open.push(summary);
+      }
+
+      if (dateVn) {
+        const directUserEvidence = [];
+        const doneTransitions = [];
+
+        if (assigned && task.claimed_at && toVnDate(task.claimed_at) === dateVn) {
+          directUserEvidence.push({
+            source: 'task_claim',
+            type: 'claimed',
+            timestamp_vn: toVnTimestamp(task.claimed_at),
+            content_preview: 'Claimed task'
+          });
+        }
+
+        for (const c of task.comments || []) {
+          if (toVnDate(c.created_at) !== dateVn) continue;
+          const isUserComment = targetUser.id && c.user_id === targetUser.id;
+          if (isUserComment) {
+            directUserEvidence.push({
+              source: 'task_comment',
+              type: c.is_system_log ? 'system_log' : 'comment',
+              timestamp_vn: toVnTimestamp(c.created_at),
+              content_preview: String(c.content || '').replace(/<[^>]+>/g, '').slice(0, 180)
+            });
+          }
+          if (assigned && c.is_system_log && /chuyển trạng thái sang ['"]DONE['"]/i.test(c.content || '')) {
+            doneTransitions.push({
+              source: 'task_comment',
+              type: 'status_done_transition',
+              actor_user_id: c.user_id || null,
+              timestamp_vn: toVnTimestamp(c.created_at),
+              content_preview: String(c.content || '').slice(0, 180)
+            });
+          }
+        }
+
+        for (const r of task.reports || []) {
+          const ts = r.created_at || r.updated_at;
+          if (toVnDate(ts) !== dateVn) continue;
+          const rUid = r.user_id || r.user?.id || null;
+          const rEmail = r.user?.email || null;
+          if (matchesTargetUser(targetUser, rUid, rEmail, r.user?.full_name || null)) {
+            directUserEvidence.push({
+              source: 'task_report',
+              type: 'report',
+              timestamp_vn: toVnTimestamp(ts),
+              content_preview: String(r.report_text || r.file_name || r.report_link_url || 'Submitted report').slice(0, 180)
+            });
+          }
+        }
+
+        if (directUserEvidence.length > 0) {
+          workedOnDate.push({
+            ...summary,
+            is_assigned_to_user: assigned,
+            evidence_count: directUserEvidence.length,
+            evidence: directUserEvidence
+          });
+        }
+
+        if (doneTransitions.length > 0) {
+          completedOnDate.push({
+            ...summary,
+            done_transitions: doneTransitions
+          });
+        }
+
+        if (assigned && task.deadline && toVnDate(task.deadline) === dateVn) {
+          deadlineOnDate.push({
+            ...summary,
+            evidence_type: 'deadline_only'
+          });
+        }
+      }
+    }
+  }
+
+  const totalAssigned = Object.values(byStatus).reduce((sum, n) => sum + n, 0);
+  const result = {
+    sourceMode: snapshot ? 'snapshot' : 'live',
+    checkedAtVn: toVnTimestamp(new Date(nowMs).toISOString()),
+    timezone: 'Asia/Saigon (+07:00)',
+    dataSources: snapshot
+      ? [args.snapshot_path]
+      : ['GET /api/v1/auth/me', 'GET /api/v1/projects/', 'GET /api/v1/projects/{project_id}/tasks/'],
+    schemaCaveat: 'MIS backend task and checklist objects do not expose created_at/updated_at/completed_at; date attribution uses only direct timestamps from comments[].created_at, reports[].created_at, claimed_at, and deadline.',
+    targetUser,
+    scannedProjectsCount: projectBundles.length,
+    scannedProjects: projectBundles.map(b => ({ id: b.project?.id || null, name: b.project?.name || null })),
+    summary: {
+      totalAssigned,
+      byStatus,
+      actionableCount: (byStatus.TODO || 0) + (byStatus.IN_PROGRESS || 0),
+      inReviewCount: (byStatus.INTERNAL_REVIEW || 0) + (byStatus.MENTOR_REVIEW || 0),
+      doneCount: byStatus.DONE || 0,
+      overdueNonDoneCount,
+      claimableOpenCount: buckets.claimable_open.length
+    },
+    buckets,
+    ...(warnings.length > 0 ? { warnings } : {})
+  };
+
+  if (dateVn) {
+    result.dateAnalysis = {
+      date_vn: dateVn,
+      workedOnDateCount: workedOnDate.length,
+      completedOnDateCount: completedOnDate.length,
+      deadlineOnDateCount: deadlineOnDate.length,
+      worked_on_date: workedOnDate,
+      completed_on_date: completedOnDate,
+      deadline_on_date: deadlineOnDate
+    };
+  }
+
+  return result;
+}

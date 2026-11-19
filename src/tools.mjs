@@ -4,7 +4,8 @@ import crypto from 'node:crypto';
 import { MisApiError, assertSafeSegment } from './client.mjs';
 import { saveEnvToken } from './config.mjs';
 import { extractAccessTokenFromCdp } from './cdp-auth.mjs';
-import { collectAccountData, queryUserLogs } from './collector.mjs';
+import { findRunningNativeChromeCdp, inspectJwt } from './auth-manager.mjs';
+import { collectAccountData, queryMyTasks, queryUserLogs } from './collector.mjs';
 
 const CHUNK_SIZE = 5 * 1024 * 1024;
 
@@ -107,17 +108,32 @@ export function createToolRegistry(client, config, deps = {}) {
     }, ['email'], true, false,
       async args => await client.request('GET', '/api/v1/users/lookup', { query: { email: args.email } })),
 
-    defTool('mis_refresh_token_from_cdp', 'Read-only extract access_token cookie from local Chrome CDP session and store it in .env.mis without echoing the raw token', {
-      cdpEndpoint: strProp('Loopback Chrome CDP endpoint (default from MIS_CDP_ENDPOINT or http://127.0.0.1:63725)', { minLength: 1 })
+    defTool('mis_refresh_token_from_cdp', 'Read-only extract access_token cookie from a running local Native Chrome CDP session (/browse-open) and store it in .env.mis without echoing the raw token', {
+      cdpEndpoint: strProp('Loopback Chrome CDP endpoint (auto-detects running /browse-open Native Chrome or defaults to MIS_CDP_ENDPOINT)', { minLength: 1 })
     }, [], true, false, async args => {
-      const endpoint = args.cdpEndpoint || config.cdpEndpoint;
+      let endpoint = args.cdpEndpoint;
+      let discoverySource = 'explicit_arg';
+      if (!endpoint) {
+        const running = await (deps.findRunningNativeChromeCdp || findRunningNativeChromeCdp)(config, deps);
+        endpoint = running?.endpoint || config.cdpEndpoint;
+        discoverySource = running?.source || 'config_default';
+      }
       const res = await cdpExtractor(endpoint, `${config.baseUrl}/`, config.timeoutMs);
+      const jwtMeta = inspectJwt(res.token);
+      if (jwtMeta.validFormat && jwtMeta.isExpired) {
+        throw new MisApiError('SESSION_EXPIRED', `access_token cookie in Native Chrome (${endpoint}) is already expired (${jwtMeta.expiresAtVn}); please sign in again via /browse-open.`, 401);
+      }
       client.setToken(res.token);
       tokenSaver(config.envFile, config.baseUrl, res.token);
       return {
         refreshed: true,
+        cdpEndpoint: endpoint,
+        discoverySource,
         domain: res.domain,
         expires: res.expires,
+        issuedAtVn: jwtMeta.issuedAtVn || null,
+        expiresAtVn: jwtMeta.expiresAtVn || null,
+        remainingDays: jwtMeta.remainingDays ?? null,
         envFile: config.envFile,
         tokenPreview: res.token.slice(0, 12) + '...'
       };
@@ -292,6 +308,18 @@ export function createToolRegistry(client, config, deps = {}) {
       save_to_file: boolProp('Save matched user timeline JSON into exports/ (default false)')
     }, [], true, false,
       async args => await queryUserLogs(client, config, args)),
+
+    defTool('mis_query_my_tasks', 'Query user tasks across accessible projects for daily check-ins ("hôm nay có task nào cần làm không?") and date-specific work history ("ngày X làm bao nhiêu task?") with strict separation of TODO, IN_PROGRESS, IN_REVIEW, DONE, claimable tasks, and direct timestamp evidence (+07:00)', {
+      user_id: strProp('Target user UUID (omit for current authenticated user)', { minLength: 1 }),
+      email: strProp('Target user email address', { minLength: 3 }),
+      project_id: strProp('Optional project UUID to restrict query to one project', { minLength: 1 }),
+      date_vn: strProp('Optional Vietnam date YYYY-MM-DD (+07:00) to inspect tasks with direct work/completion/deadline evidence on that date', { minLength: 10 }),
+      status: strProp('Optional status filter', { enum: ['TODO', 'IN_PROGRESS', 'INTERNAL_REVIEW', 'MENTOR_REVIEW', 'DONE'] }),
+      include_done: boolProp('Include full DONE task list in buckets.done (default false to keep responses compact)'),
+      include_claimable: boolProp('Include open claimable tasks not yet assigned to user (default true)'),
+      snapshot_path: strProp('Optional workspace path to full-snapshot.json or manifest.json for offline queries', { minLength: 1 })
+    }, [], true, false,
+      async args => await queryMyTasks(client, config, args)),
 
     // ── Write / Action Tools (Project & Task Automation) ──
     defTool('mis_create_task', 'Create a new task in a project (POST /api/v1/projects/{project_id}/tasks/)', {

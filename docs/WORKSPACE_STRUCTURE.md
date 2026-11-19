@@ -8,10 +8,11 @@ Tài liệu mô tả cấu trúc Specific Agent độc lập của workspace `MI
 MIS-matrix/
 ├── AGENTS.md                        # Always-on contract: dispatch poteto-mode, playbooks/skills, guardrails
 ├── README.md                        # Hướng dẫn cài đặt, đăng ký MCP và chạy kiểm thử
-├── package.json                     # Entrypoint mis_matrix MCP & scripts (test, test:mcp, test:contract, test:live-readonly)
+├── setup.mjs                        # Entrypoint onboarding 1 lệnh (bắt buộc /browse-open, cấu hình MCP, smoke test)
+├── package.json                     # Entrypoint mis_matrix MCP & scripts (setup, test, test:mcp, test:contract, test:onboarding, test:live-readonly)
 ├── .env.example                     # Mẫu cấu hình môi trường (không chứa secret thật)
 ├── .env.mis                         # [gitignored, local-only] MIS_BASE_URL & MIS_BEARER_TOKEN thực tế
-├── .gitignore                       # Bỏ qua .env, .env.* (!.env.example), secrets/, context/, records/, reports/, exports/, downloads/, scripts/legacy/*.mjs
+├── .gitignore                       # Bỏ qua .env, .env.* (!.env.example), secrets/, context/, records/, reports/, exports/, downloads/, scripts/legacy/*.mjs, .agents/skills/browse-open/
 │
 ├── .agents/                         # Lớp điều phối & năng lực Specific Agent
 │   ├── playbooks/                   # 6 quy trình tác nghiệp chuẩn
@@ -36,6 +37,7 @@ MIS-matrix/
 │       └── 2026-11-19_specific-agent-refactor.md
 │
 ├── src/                             # Mã nguồn ứng dụng & MCP Server mis_matrix (Node >= 22, zero deps)
+│   ├── onboarding.mjs               # Pipeline setup tự động (Node >=22, /browse-open CDP, starter context, MCP config, smoke test)
 │   ├── mcp-server.mjs
 │   ├── tools.mjs
 │   ├── collector.mjs
@@ -64,9 +66,10 @@ MIS-matrix/
 │
 ├── reports/                         # Dữ liệu khảo sát OpenAPI, inline JS, DOM & screenshots minh chứng
 ├── exports/                         # [gitignored] Dữ liệu account & user timeline xuất từ mis_collect_account_data
-└── tests/                           # Bộ kiểm thử unit, workspace contract & live GET-only
+└── tests/                           # Bộ kiểm thử unit, workspace contract, onboarding & live GET-only
     ├── mcp.test.mjs
     ├── workspace-contract.test.mjs
+    ├── onboarding.test.mjs
     └── live-readonly.test.mjs
 ```
 

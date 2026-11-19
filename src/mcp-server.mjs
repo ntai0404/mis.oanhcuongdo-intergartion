@@ -3,11 +3,15 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { MisClient, MisApiError } from './client.mjs';
+import { AuthSessionManager } from './auth-manager.mjs';
 import { createToolRegistry } from './tools.mjs';
 
 export function createMcpServer(options = {}) {
   const config = options.config || loadConfig(options.env);
-  const client = options.client || new MisClient(config, options.fetchImpl);
+  const authManager = options.authManager !== undefined
+    ? options.authManager
+    : new AuthSessionManager(config, { fetchImpl: options.fetchImpl, ...(options.deps || {}) });
+  const client = options.client || new MisClient(config, options.fetchImpl, { authManager });
   const registry = createToolRegistry(client, config, options.deps);
 
   async function dispatch(request) {

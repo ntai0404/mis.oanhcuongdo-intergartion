@@ -9,9 +9,12 @@
   },
   "scripts": {
     "start": "node src/mcp-server.mjs",
-    "test": "node --test tests/mcp.test.mjs tests/workspace-contract.test.mjs",
+    "setup": "node setup.mjs",
+    "test": "node --test tests/mcp.test.mjs tests/workspace-contract.test.mjs tests/onboarding.test.mjs tests/auth-session.test.mjs",
     "test:mcp": "node --test tests/mcp.test.mjs",
     "test:contract": "node --test tests/workspace-contract.test.mjs",
+    "test:onboarding": "node --test tests/onboarding.test.mjs",
+    "test:auth": "node --test tests/auth-session.test.mjs",
     "test:live-readonly": "node --test tests/live-readonly.test.mjs"
   },
   "engines": {

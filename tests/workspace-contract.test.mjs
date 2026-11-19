@@ -8,9 +8,11 @@ import { createToolRegistry } from '../src/tools.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function collectMarkdownFiles(dir) {
+  const externalBrowseOpen = path.resolve(ROOT, '.agents', 'skills', 'browse-open');
   const results = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
+    if (path.resolve(full) === externalBrowseOpen) continue;
     if (entry.isDirectory()) results.push(...collectMarkdownFiles(full));
     else if (entry.isFile() && entry.name.endsWith('.md')) results.push(full);
   }
@@ -21,6 +23,7 @@ test('Required Specific Agent workspace structure exists and no placeholder .age
   const required = [
     'AGENTS.md',
     'README.md',
+    'setup.mjs',
     'package.json',
     '.env.example',
     '.gitignore',
@@ -31,6 +34,7 @@ test('Required Specific Agent workspace structure exists and no placeholder .age
     'scripts/analyze-openapi.mjs',
     'scripts/build-docs.mjs',
     'scripts/legacy/MANIFEST.md',
+    '.agents/playbooks/checkin.md',
     '.agents/playbooks/collect-account-data.md',
     '.agents/playbooks/investigation.md',
     '.agents/playbooks/onboarding-auth.md',
@@ -40,12 +44,16 @@ test('Required Specific Agent workspace structure exists and no placeholder .age
     '.agents/skills/mis-account-collector/SKILL.md',
     '.agents/skills/mis-project-ops/SKILL.md',
     '.agents/skills/verify-evidence/SKILL.md',
+    'src/onboarding.mjs',
+    'src/auth-manager.mjs',
     'src/mcp-server.mjs',
     'src/tools.mjs',
     'src/collector.mjs',
     'src/client.mjs',
     'src/config.mjs',
-    'src/cdp-auth.mjs'
+    'src/cdp-auth.mjs',
+    'tests/onboarding.test.mjs',
+    'tests/auth-session.test.mjs'
   ];
 
   for (const rel of required) {
@@ -64,6 +72,7 @@ test('AGENTS.md respects size budget and declares poteto-mode routing and guardr
     'Read-Playbook-First',
     'Playbook / Skill Verification Gate',
     'On-Demand Personal Context Policy',
+    '.agents/playbooks/checkin.md',
     '.agents/playbooks/collect-account-data.md',
     '.agents/playbooks/investigation.md',
     '.agents/playbooks/onboarding-auth.md',
@@ -114,19 +123,19 @@ test('All relative markdown links across handbook, playbooks, skills, scripts do
   assert.deepEqual(broken, [], `Broken relative links: ${broken.join(', ')}`);
 });
 
-test('MCP tool registry invariants match expected 48-tool contract', () => {
+test('MCP tool registry invariants match expected 49-tool contract', () => {
   const reg = createToolRegistry({}, {});
-  assert.equal(reg.tools.length, 48);
+  assert.equal(reg.tools.length, 49);
   const ro = reg.tools.filter(t => t.annotations?.readOnlyHint === true);
   const rw = reg.tools.filter(t => t.annotations?.readOnlyHint !== true);
-  assert.equal(ro.length, 30);
+  assert.equal(ro.length, 31);
   assert.equal(rw.length, 18);
 
   for (const tool of reg.tools) {
     assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} must disallow extra args`);
   }
 
-  for (const collectorName of ['mis_collect_account_data', 'mis_get_user_logs']) {
+  for (const collectorName of ['mis_collect_account_data', 'mis_get_user_logs', 'mis_query_my_tasks']) {
     const t = reg.tools.find(item => item.name === collectorName);
     assert.ok(t, `Missing tool ${collectorName}`);
     assert.equal(t.annotations.readOnlyHint, true);
@@ -143,7 +152,7 @@ test('Active scripts use portable paths and .gitignore protects sensitive/local 
   const gitignore = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8')
     .split(/\r?\n/)
     .map(l => l.trim());
-  for (const rule of ['.env', '.env.*', '!.env.example', 'secrets/', 'node_modules/', 'downloads/', 'exports/', 'context/', 'records/', 'reports/', 'scripts/legacy/*.mjs']) {
+  for (const rule of ['.env', '.env.*', '!.env.example', 'secrets/', 'node_modules/', 'downloads/', 'exports/', 'context/', 'records/', 'reports/', 'scripts/legacy/*.mjs', '.agents/skills/browse-open/']) {
     assert.ok(gitignore.includes(rule), `.gitignore missing ${rule}`);
   }
 });

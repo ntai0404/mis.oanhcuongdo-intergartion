@@ -32,9 +32,10 @@ export function assertSafeApiPath(apiPath) {
 }
 
 export class MisClient {
-  constructor(config, fetchImpl = globalThis.fetch) {
+  constructor(config, fetchImpl = globalThis.fetch, options = {}) {
     this.config = config;
     this.fetchImpl = fetchImpl;
+    this.authManager = options.authManager || null;
   }
 
   setToken(token) {
@@ -62,8 +63,17 @@ export class MisClient {
 
     const headers = new Headers(options.headers || {});
     if (!options.skipAuth) {
+      if (!this.config.token && this.authManager && !options._retriedAuth) {
+        await this.authManager.trySilentRecover('', 'MISSING_TOKEN');
+      }
       if (!this.config.token) {
-        throw new MisApiError('AUTH_REQUIRED', 'MIS_BEARER_TOKEN is missing; configure .env.mis or run mis_refresh_token_from_cdp', 401);
+        throw new MisApiError('AUTH_REQUIRED', 'MIS_BEARER_TOKEN is missing; configure .env.mis or run node setup.mjs / mis_refresh_token_from_cdp', 401);
+      }
+      if (this.authManager && !options._retriedAuth && this.authManager.needsPreemptiveRefresh(this.config.token)) {
+        const rec = await this.authManager.trySilentRecover(this.config.token, 'PREEMPTIVE_EXPIRED');
+        if (!rec.recovered) {
+          throw this.authManager.buildExpiredError(rec);
+        }
       }
       headers.set('Authorization', `Bearer ${this.config.token}`);
     }
@@ -88,6 +98,14 @@ export class MisClient {
       });
     } catch (err) {
       throw new MisApiError('NETWORK_ERROR', `Request failed (${upperMethod} ${cleanPath}): ${err.message}`, 502);
+    }
+
+    if (res.status === 401 && !options.skipAuth && !options._retriedAuth && this.authManager) {
+      const rec = await this.authManager.trySilentRecover(this.config.token, 'HTTP_401');
+      if (rec.recovered) {
+        return await this.request(method, apiPath, { ...options, _retriedAuth: true });
+      }
+      throw this.authManager.buildExpiredError(rec);
     }
 
     if (res.status >= 300 && res.status < 400) {

@@ -7,9 +7,10 @@ Always-on workspace handbook for **Matrix AI EDU** (`https://mis.oanhcuongdo.com
 Classify every natural-language request (no `/skill` required) and route cleanly:
 
 1. **Matching Playbook (`.agents/playbooks/`):**
+   - **Check-in / Daily tasks / Date task Q&A** (`"check-in dữ liệu MIS"`, `"hôm nay có task nào cần làm không"`, `"ngày X làm bao nhiêu task"`, `"việc chưa xong"`): read & follow [.agents/playbooks/checkin.md](.agents/playbooks/checkin.md) (calls `mis_query_my_tasks` directly; no `/skill` or tool name required).
    - **Account data export / user logs** (`"thu thập full"`, `"export data"`, `"full log theo user"`): read & follow [.agents/playbooks/collect-account-data.md](.agents/playbooks/collect-account-data.md).
    - **Read-only audit / investigation** (`"tại sao"`, `"kiểm tra xem"`, `"nhìn thấy task nào"`, `"đối chiếu"`, MCP/API debugging): read & follow [.agents/playbooks/investigation.md](.agents/playbooks/investigation.md).
-   - **Setup / Auth refresh / MCP registration** (`"setup"`, `"hết hạn token"`, `"reauth"`, `"đăng ký mcp"`): read & follow [.agents/playbooks/onboarding-auth.md](.agents/playbooks/onboarding-auth.md).
+   - **Setup / Auth refresh / MCP registration** (`"setup"`, `"hết hạn token"`, `"reauth"`, `"đăng ký mcp"`): read & follow [.agents/playbooks/onboarding-auth.md](.agents/playbooks/onboarding-auth.md) (uses `node setup.mjs` and requires `/browse-open` for Native Chrome CDP; never launch Chrome via Playwright).
    - **Post-change verification** (after any edit, refactor, or cleanup): read & follow [.agents/playbooks/verify-and-evidence.md](.agents/playbooks/verify-and-evidence.md).
    - **Resume prior session** (`"tiếp tục"`, `"continue"`, cold-start pickup): read & follow [.agents/playbooks/session-pickup.md](.agents/playbooks/session-pickup.md).
    - **Pause & handoff** (`"tạm dừng"`, `"pause"`, stop mid-flight): read & follow [.agents/playbooks/pause-safely.md](.agents/playbooks/pause-safely.md).
@@ -38,7 +39,7 @@ Classify every natural-language request (no `/skill` required) and route cleanly
 ## 2. Workspace Map (Read on Demand)
 
 - **Context (`context/` — gitignored local state):** [PROFILE.md](context/PROFILE.md), [STATE.md](context/STATE.md), [DECISIONS.md](context/DECISIONS.md), [domain-overview.md](context/domain-overview.md), [directory.md](context/directory.md), `handoffs/`.
-- **Application & MCP Server (`src/` — Node.js `>=22`, zero deps):** [`mcp-server.mjs`](src/mcp-server.mjs), [`tools.mjs`](src/tools.mjs) (48 tools: 30 read-only, 18 write), [`collector.mjs`](src/collector.mjs), [`client.mjs`](src/client.mjs), [`config.mjs`](src/config.mjs), [`cdp-auth.mjs`](src/cdp-auth.mjs).
+- **Application & MCP Server (`src/` — Node.js `>=22`, zero deps):** [`setup.mjs`](setup.mjs), [`onboarding.mjs`](src/onboarding.mjs), [`auth-manager.mjs`](src/auth-manager.mjs), [`mcp-server.mjs`](src/mcp-server.mjs), [`tools.mjs`](src/tools.mjs) (49 tools: 31 read-only, 18 write), [`collector.mjs`](src/collector.mjs), [`client.mjs`](src/client.mjs), [`config.mjs`](src/config.mjs), [`cdp-auth.mjs`](src/cdp-auth.mjs).
 - **Tools & Scripts (`scripts/`):** Active doc builders in [`scripts/README.md`](scripts/README.md); archived one-off CDP scripts in [`scripts/legacy/MANIFEST.md`](scripts/legacy/MANIFEST.md).
 - **Docs, Evidence & Tests:** [`docs/WORKSPACE_STRUCTURE.md`](docs/WORKSPACE_STRUCTURE.md), [`docs/MIS-API-REFERENCE.md`](docs/MIS-API-REFERENCE.md), [`docs/MIS-UI-AND-MCP-BLUEPRINT.md`](docs/MIS-UI-AND-MCP-BLUEPRINT.md), [`records/decisions.tsv`](records/decisions.tsv), `reports/`, `exports/`, `tests/`.
 - *(Subagent role files `.agents/agents/` are intentionally omitted until an active multi-agent workflow needs them.)*

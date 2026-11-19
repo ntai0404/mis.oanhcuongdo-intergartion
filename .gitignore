@@ -18,6 +18,7 @@ reports/
 exports/
 downloads/
 scripts/legacy/*.mjs
+.agents/skills/browse-open/
 
 # OS / editor / temporary noise
 .DS_Store

@@ -34,7 +34,7 @@ async function withMockServer(handler) {
 
 test('MCP initialize and tools/list expose well-formed schemas', async () => {
   const srv = createMcpServer({
-    config: { baseUrl: 'https://mis.oanhcuongdo.com', token: 'dummy', cdpEndpoint: 'http://127.0.0.1:63725', readOnly: true, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
+    config: { baseUrl: 'https://mis.oanhcuongdo.com', token: 'dummy', cdpEndpoint: 'http://127.0.0.1:4444', readOnly: true, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
   });
   const init = await srv.dispatch({ jsonrpc: '2.0', id: 1, method: 'initialize' });
   assert.equal(init.result.serverInfo.name, 'mis_matrix');
@@ -67,7 +67,7 @@ test('MCP attaches Bearer token on requests and supports read/write routing agai
   t.after(() => mock.close());
 
   const srv = createMcpServer({
-    config: { baseUrl: mock.baseUrl, token: 'test-jwt-secret', cdpEndpoint: 'http://127.0.0.1:63725', readOnly: false, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
+    config: { baseUrl: mock.baseUrl, token: 'test-jwt-secret', cdpEndpoint: 'http://127.0.0.1:4444', readOnly: false, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
   });
 
   const meRes = await srv.dispatch({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'mis_get_me', arguments: {} } });
@@ -93,7 +93,7 @@ test('MIS_READ_ONLY blocks all non-GET tools and raw mutations before network ca
   t.after(() => mock.close());
 
   const srv = createMcpServer({
-    config: { baseUrl: mock.baseUrl, token: 'test-jwt-secret', cdpEndpoint: 'http://127.0.0.1:63725', readOnly: true, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
+    config: { baseUrl: mock.baseUrl, token: 'test-jwt-secret', cdpEndpoint: 'http://127.0.0.1:4444', readOnly: true, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
   });
 
   const r1 = await srv.dispatch({
@@ -118,7 +118,7 @@ test('MIS_READ_ONLY blocks all non-GET tools and raw mutations before network ca
 
 test('Path traversal and unknown arguments are rejected cleanly', async () => {
   const srv = createMcpServer({
-    config: { baseUrl: 'https://mis.oanhcuongdo.com', token: 'dummy', cdpEndpoint: 'http://127.0.0.1:63725', readOnly: true, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
+    config: { baseUrl: 'https://mis.oanhcuongdo.com', token: 'dummy', cdpEndpoint: 'http://127.0.0.1:4444', readOnly: true, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
   });
 
   const badSegment = await srv.dispatch({
@@ -161,7 +161,7 @@ test('mis_submit_task_report sends multipart FormData cleanly to mock server', a
   t.after(() => mock.close());
 
   const srv = createMcpServer({
-    config: { baseUrl: mock.baseUrl, token: 'tok', cdpEndpoint: 'http://127.0.0.1:63725', readOnly: false, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
+    config: { baseUrl: mock.baseUrl, token: 'tok', cdpEndpoint: 'http://127.0.0.1:4444', readOnly: false, timeoutMs: 5000, envFile: '', downloadsDir: os.tmpdir() }
   });
 
   const res = await srv.dispatch({
@@ -278,7 +278,7 @@ test('mis_collect_account_data collects account scope via GET-only and mis_get_u
       workspaceRoot: tmpRoot,
       baseUrl: mock.baseUrl,
       token: 'tok',
-      cdpEndpoint: 'http://127.0.0.1:63725',
+      cdpEndpoint: 'http://127.0.0.1:4444',
       readOnly: true,
       timeoutMs: 5000,
       envFile: '',
@@ -357,4 +357,25 @@ test('mis_collect_account_data collects account scope via GET-only and mis_get_u
   assert.equal(otherData.sourceMode, 'live');
   assert.equal(otherData.totalMatched, 1);
   assert.equal(otherData.logs[0].content, 'Comment by u2');
+
+  // Test mis_query_my_tasks separates status buckets and date evidence strictly
+  const taskQuery = await srv.dispatch({
+    jsonrpc: '2.0',
+    id: 5,
+    method: 'tools/call',
+    params: {
+      name: 'mis_query_my_tasks',
+      arguments: {
+        snapshot_path: manifest.files.manifest,
+        date_vn: '2026-11-11'
+      }
+    }
+  });
+  assert.equal(taskQuery.result.isError, false);
+  const qData = taskQuery.result.structuredContent.data;
+  assert.equal(qData.sourceMode, 'snapshot');
+  assert.equal(qData.dateAnalysis.date_vn, '2026-11-11');
+  assert.equal(qData.dateAnalysis.workedOnDateCount, 1);
+  assert.equal(qData.dateAnalysis.worked_on_date[0].task_id, 't1');
+  assert.equal(qData.dateAnalysis.worked_on_date[0].evidence_count, 2); // c2 + r1 on 2026-11-11
 });
