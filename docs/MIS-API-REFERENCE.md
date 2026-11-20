@@ -3,7 +3,7 @@
 - **OpenAPI Title**: Matrix AI EDU API (`v0.1.0`)
 - **OpenAPI Version**: `3.1.0`
 - **Source**: `https://mis.oanhcuongdo.com/openapi.json` (Swagger UI: `/docs`, ReDoc: `/redoc`)
-- **Total Endpoints**: 145 | **Total Schemas**: 135
+- **Total Endpoints**: 147 | **Total Schemas**: 135 (live inventory on 2026-11-20)
 - **Authentication**:
   - **Header**: `Authorization: Bearer <JWT>` (verified `200 OK` on `GET /api/v1/auth/me` & `GET /api/v1/projects/{id}`)
   - **Cookie**: `Cookie: access_token=<JWT>` (`httpOnly: true`, `SameSite: Lax`, `path: /`)
@@ -37,7 +37,7 @@
 | `GET` | `/api/v1/courses` | Get Courses | `semester` (query) | - |
 | `GET` | `/api/v1/courses/{course_id}/students` | Get Course Students | `course_id` (path*) | - |
 
-## Tag: `course-management` (21)
+## Tag: `course-management` (23)
 
 | Method | Path | Summary | Params | Request Body |
 | --- | --- | --- | --- | --- |
@@ -52,6 +52,8 @@
 | `POST` | `/api/v1/courses/{course_id}/invites` | Create Invite | `course_id` (path*) | - |
 | `DELETE` | `/api/v1/courses/{course_id}/invites` | Revoke Invites | `course_id` (path*) | - |
 | `POST` | `/api/v1/courses/join` | Join Course | - | `application/json`: JoinCodeRequest { code*: string } |
+| `POST` | `/api/v1/courses/{course_id}/claim` | Claim Course | `course_id` (path*) | - |
+| `POST` | `/api/v1/courses/{course_id}/unclaim` | Unclaim Course | `course_id` (path*) | - |
 | `GET` | `/api/v1/courses/{course_id}/roster` | Get Roster | `course_id` (path*) | - |
 | `POST` | `/api/v1/courses/{course_id}/roster` | Manual Enroll | `course_id` (path*) | `application/json`: ManualEnrollmentRequest { user_id*: string } |
 | `POST` | `/api/v1/enrollments/{enrollment_id}/approve` | Approve Enrollment | `enrollment_id` (path*) | - |

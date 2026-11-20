@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { MisApiError, assertSafeSegment } from './client.mjs';
+import { dateBounds, loggedActorName, pageOf, statusTransition, toVnTimestamp } from './data-access.mjs';
 
 const VALID_LOG_TYPES = ['comment', 'system_log', 'report', 'checklist', 'feed'];
 
@@ -52,19 +53,6 @@ async function safeGet(client, apiPath, options, warnings, scope) {
   }
 }
 
-function normalizeDateBound(raw, isEnd) {
-  if (!raw) return null;
-  const str = String(raw).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
-    return Date.parse(isEnd ? `${str}T23:59:59.999Z` : `${str}T00:00:00.000Z`);
-  }
-  const ms = Date.parse(str);
-  if (Number.isNaN(ms)) {
-    throw new MisApiError('INVALID_ARGUMENT', `Invalid date value: ${raw}`, 400);
-  }
-  return ms;
-}
-
 function slugToken(value) {
   return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 64) || 'unknown';
 }
@@ -91,9 +79,10 @@ function enrichTargetUserFromBundles(projectBundles, targetUser) {
   }
   for (const u of userMap.values()) {
     const idMatch = targetUser.id && u.id === targetUser.id;
-    const emailMatch = targetUser.email && u.email?.toLowerCase() === targetUser.email.toLowerCase();
+    const emailMatch = !targetUser.id && targetUser.email && u.email?.toLowerCase() === targetUser.email.toLowerCase();
     if (idMatch || emailMatch) {
       return {
+        ...targetUser,
         id: u.id || targetUser.id,
         email: u.email || targetUser.email,
         full_name: u.full_name || targetUser.full_name
@@ -103,11 +92,10 @@ function enrichTargetUserFromBundles(projectBundles, targetUser) {
   return targetUser;
 }
 
-function matchesTargetUser(target, candidateId, candidateEmail, candidateName) {
+function matchesTargetUser(target, candidateId, candidateEmail) {
   if (!target || (!target.id && !target.email && !target.full_name)) return true;
-  if (target.id && candidateId && candidateId === target.id) return true;
+  if (target.id && candidateId) return candidateId === target.id;
   if (target.email && candidateEmail && candidateEmail.toLowerCase() === target.email.toLowerCase()) return true;
-  if (!candidateId && target.full_name && candidateName && candidateName === target.full_name) return true;
   return false;
 }
 
@@ -128,9 +116,9 @@ export function buildUserTimeline(projectBundles, targetUser = null, options = {
     }
   }
 
-  const fromMs = normalizeDateBound(options.date_from, false);
-  const toMs = normalizeDateBound(options.date_to, true);
-  const limit = Number.isInteger(options.limit) ? options.limit : 500;
+  const within = dateBounds(options.date_from, options.date_to);
+  const dated = Boolean(options.date_from || options.date_to);
+  const limit = Number.isInteger(options.limit) ? options.limit : (options.compact ? 25 : 500);
 
   const userMap = new Map();
   if (targetUser) registerUser(userMap, targetUser);
@@ -149,13 +137,7 @@ export function buildUserTimeline(projectBundles, targetUser = null, options = {
   const pushIfMatched = entry => {
     if (!allowedTypes.has(entry.type)) return;
     if (!includeSystemLogs && entry.type === 'system_log') return;
-    if (fromMs !== null || toMs !== null) {
-      if (!entry.created_at) return;
-      const ms = Date.parse(entry.created_at);
-      if (Number.isNaN(ms)) return;
-      if (fromMs !== null && ms < fromMs) return;
-      if (toMs !== null && ms > toMs) return;
-    }
+    if (dated && !within(entry.created_at)) return;
     breakdown[entry.type] = (breakdown[entry.type] || 0) + 1;
     matched.push(entry);
   };
@@ -170,7 +152,7 @@ export function buildUserTimeline(projectBundles, targetUser = null, options = {
       for (const c of task.comments || []) {
         if (c.id) seenIds.add(c.id);
         const u = userMap.get(c.user_id);
-        if (!matchesTargetUser(targetUser, c.user_id, u?.email, u?.full_name)) continue;
+        if (!matchesTargetUser(targetUser, c.user_id, u?.email)) continue;
         pushIfMatched({
           id: c.id || null,
           source: 'task_comment',
@@ -182,7 +164,7 @@ export function buildUserTimeline(projectBundles, targetUser = null, options = {
           task_id: task.id || null,
           task_title: task.title || null,
           user_id: c.user_id || null,
-          user_name: u?.full_name || null,
+          user_name: u?.full_name || loggedActorName(c) || null,
           user_email: u?.email || null,
           content: c.content || '',
           ip_address: c.ip_address || null,
@@ -192,13 +174,13 @@ export function buildUserTimeline(projectBundles, targetUser = null, options = {
 
       for (const r of task.reports || []) {
         const u = r.user || userMap.get(r.user_id);
-        if (!matchesTargetUser(targetUser, r.user_id || u?.id, u?.email, u?.full_name)) continue;
+        if (!matchesTargetUser(targetUser, r.user_id || u?.id, u?.email)) continue;
         pushIfMatched({
           id: r.id || null,
           source: 'task_report',
           type: 'report',
           is_system_log: false,
-          created_at: r.created_at || r.updated_at || null,
+          created_at: r.created_at || null,
           project_id: projectId,
           project_name: projectName,
           task_id: task.id || null,
@@ -219,13 +201,14 @@ export function buildUserTimeline(projectBundles, targetUser = null, options = {
       for (const ch of task.checklists || []) {
         if (!ch.is_completed && !ch.completed_by_id) continue;
         const u = userMap.get(ch.completed_by_id);
-        if (!matchesTargetUser(targetUser, ch.completed_by_id, u?.email, u?.full_name)) continue;
+        if (!matchesTargetUser(targetUser, ch.completed_by_id, u?.email)) continue;
         pushIfMatched({
           id: ch.id || null,
           source: 'task_checklist',
           type: 'checklist',
           is_system_log: false,
-          created_at: ch.completed_at || ch.updated_at || task.updated_at || null,
+          created_at: ch.completed_at || null,
+          evidence: ch.completed_at ? 'checklist_completion_timestamp' : 'current_checklist_state',
           project_id: projectId,
           project_name: projectName,
           task_id: task.id || null,
@@ -247,12 +230,15 @@ export function buildUserTimeline(projectBundles, targetUser = null, options = {
         : (Array.isArray(bundle.feed) ? bundle.feed : []);
       for (const f of feedItems) {
         if (f.id && seenIds.has(f.id)) continue;
-        if (!matchesTargetUser(targetUser, f.user_id || null, null, f.user_name || null)) continue;
+        const nameMatch = !options.compact && !dated && !f.user_id && targetUser?.full_name
+          && f.user_name === targetUser.full_name;
+        if (!nameMatch && !matchesTargetUser(targetUser, f.user_id || null, null)) continue;
         const isSys = Boolean(f.is_system_log);
         if (!includeSystemLogs && isSys) continue;
         pushIfMatched({
           id: f.id || null,
           source: 'project_feed',
+          actor_attribution: f.user_id ? 'user_id' : nameMatch ? 'inferred_display_name' : 'display_name_only',
           type: isSys ? 'feed' : 'comment',
           is_system_log: isSys,
           created_at: f.created_at || null,
@@ -275,11 +261,19 @@ export function buildUserTimeline(projectBundles, targetUser = null, options = {
     return (Number.isNaN(bms) ? -1 : bms) - (Number.isNaN(ams) ? -1 : ams);
   });
 
-  const limited = limit > 0 ? matched.slice(0, limit) : matched;
+  const offset = options.offset ?? 0;
+  const page = pageOf(matched, offset, limit > 0 ? limit : matched.length);
+  const limited = options.compact
+    ? page.items.map(({ ip_address, location, user_email, file_url, ...entry }) => ({
+        ...entry, timestamp_vn: toVnTimestamp(entry.created_at), content: String(entry.content || '').slice(0, 240)
+      }))
+    : page.items;
   return {
     totalMatched: matched.length,
     returnedCount: limited.length,
-    truncated: matched.length > limited.length,
+    truncated: offset > 0 || page.next_offset !== null,
+    offset,
+    next_offset: page.next_offset,
     breakdown,
     logs: limited
   };
@@ -621,6 +615,10 @@ export async function collectAccountData(client, config, args = {}) {
  * from either a saved snapshot file or live GET API calls.
  */
 export async function queryUserLogs(client, config, args = {}) {
+  dateBounds(args.date_from, args.date_to);
+  if (args.all_actors && (args.user_id || args.email || !args.project_id)) {
+    throw new MisApiError('INVALID_ARGUMENT', 'all_actors requires a project_id and no user_id or email', 400);
+  }
   const workspaceRoot = config.workspaceRoot ? path.resolve(config.workspaceRoot) : path.dirname(getExportsRoot(config));
   const exportsRoot = getExportsRoot(config);
 
@@ -640,7 +638,9 @@ export async function queryUserLogs(client, config, args = {}) {
   }
 
   let targetUser = null;
-  if (args.user_id || args.email) {
+  if (args.all_actors) {
+    targetUser = null;
+  } else if (args.user_id || args.email) {
     targetUser = {
       id: args.user_id || null,
       email: args.email || null,
@@ -673,21 +673,19 @@ export async function queryUserLogs(client, config, args = {}) {
       projectBundles = projectBundles.filter(b => b.project?.id === args.project_id);
     }
   } else {
-    let projectIds = [];
-    if (args.project_id) {
-      projectIds = [args.project_id];
-    } else {
-      const list = await client.request('GET', '/api/v1/projects/');
-      projectIds = (Array.isArray(list) ? list : []).map(p => p.id).filter(Boolean);
-    }
-
-    projectBundles = await mapLimit(projectIds, 3, async projectId => {
+    const projects = args.project_id ? [{ id: args.project_id }] : await client.request('GET', '/api/v1/projects/');
+    const needsFeed = args.include_feed_only_events !== false
+      && (!args.types?.length || args.types.some(type => type === 'comment' || type === 'feed'));
+    projectBundles = await mapLimit(projects, 3, async summary => {
+      const projectId = summary.id;
       const pid = assertSafeSegment(projectId, 'project_id');
       const [project, members, tasks, feed] = await Promise.all([
-        safeGet(client, `/api/v1/projects/${pid}`, {}, warnings, `project:${projectId}:detail`),
-        safeGet(client, `/api/v1/projects/${pid}/members`, {}, warnings, `project:${projectId}:members`),
+        summary.name ? summary : safeGet(client, `/api/v1/projects/${pid}`, {}, warnings, `project:${projectId}:detail`),
+        targetUser?.email && !targetUser.id
+          ? safeGet(client, `/api/v1/projects/${pid}/members`, {}, warnings, `project:${projectId}:members`)
+          : [],
         safeGet(client, `/api/v1/projects/${pid}/tasks/`, {}, warnings, `project:${projectId}:tasks`),
-        args.include_feed_only_events !== false
+        needsFeed
           ? safeGet(client, `/api/v1/projects/${pid}/feed`, {}, warnings, `project:${projectId}:feed`)
           : Promise.resolve(null)
       ]);
@@ -702,12 +700,15 @@ export async function queryUserLogs(client, config, args = {}) {
   }
 
   targetUser = enrichTargetUserFromBundles(projectBundles, targetUser);
+  if (!args.all_actors && !targetUser?.id && !targetUser?.email) {
+    throw new MisApiError('IDENTITY_UNAVAILABLE', 'No MIS user ID or email was resolved', 422);
+  }
   const timeline = buildUserTimeline(projectBundles, targetUser, args);
   let savedPath = null;
   if (args.save_to_file) {
     fs.mkdirSync(exportsRoot, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    savedPath = path.join(exportsRoot, `user-logs-${slugToken(targetUser.id || targetUser.email || 'user')}-${stamp}.json`);
+    savedPath = path.join(exportsRoot, `user-logs-${slugToken(targetUser?.id || targetUser?.email || 'project')}-${stamp}.json`);
     fs.writeFileSync(savedPath, JSON.stringify({
       generatedAt: new Date().toISOString(),
       targetUser,
@@ -719,6 +720,7 @@ export async function queryUserLogs(client, config, args = {}) {
   return {
     sourceMode: snapshot ? 'snapshot' : 'live',
     targetUser,
+    coverage: 'Visible task events and project feed. Dated or compact user queries require actor identity. Legacy unfiltered feed name matches are marked inferred. Undated checklist state is excluded from date filters.',
     scannedProjectsCount: projectBundles.length,
     scannedProjects: projectBundles.map(b => ({ id: b.project?.id || b.project_id, name: b.project?.name || null })),
     ...(warnings.length > 0 ? { warnings } : {}),
@@ -727,30 +729,11 @@ export async function queryUserLogs(client, config, args = {}) {
   };
 }
 
-function toVnDate(iso) {
-  if (!iso) return null;
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return null;
-  const d = new Date(ms + 7 * 3600 * 1000);
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-}
-
-function toVnTimestamp(iso) {
-  if (!iso) return null;
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return null;
-  const d = new Date(ms + 7 * 3600 * 1000);
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} +07:00`;
-}
-
 function isUserAssignedToTask(task, targetUser) {
   if (!targetUser) return false;
   if (targetUser.id && task.assignee_id === targetUser.id) return true;
   for (const a of task.assignees || []) {
-    if (targetUser.id && a.id === targetUser.id) return true;
-    if (targetUser.email && a.email && a.email.toLowerCase() === targetUser.email.toLowerCase()) return true;
+    if (matchesTargetUser(targetUser, a.id, a.email)) return true;
   }
   return false;
 }
@@ -764,6 +747,7 @@ function summarizeTask(project, task, nowMs) {
     project_id: project.id || null,
     project_name: project.name || null,
     task_id: task.id || null,
+    parent_id: task.parent_id || null,
     title: task.title || '',
     status: task.status || null,
     deadline_utc: task.deadline || null,
@@ -777,6 +761,20 @@ function summarizeTask(project, task, nowMs) {
   };
 }
 
+function compactPeriodTask(summary) {
+  return {
+    project_id: summary.project_id,
+    project_name: summary.project_name,
+    task_id: summary.task_id,
+    parent_id: summary.parent_id,
+    title: summary.title,
+    status: summary.status,
+    deadline_vn: summary.deadline_vn,
+    ...(summary.is_overdue ? { is_overdue: true } : {}),
+    checklist_progress: summary.checklist_progress
+  };
+}
+
 /**
  * High-signal, read-only task query across accessible projects for natural Q&A:
  * - Check-in / "today's tasks" (strictly separating TODO, IN_PROGRESS, IN_REVIEW, DONE, and claimable open tasks)
@@ -784,10 +782,21 @@ function summarizeTask(project, task, nowMs) {
  */
 export async function queryMyTasks(client, config, args = {}) {
   const nowMs = Date.now();
-  const dateVn = args.date_vn ? String(args.date_vn).trim() : null;
-  if (dateVn && !/^\d{4}-\d{2}-\d{2}$/.test(dateVn)) {
-    throw new MisApiError('INVALID_ARGUMENT', 'date_vn must be formatted as YYYY-MM-DD (Asia/Saigon +07:00)', 400);
+  let dateVn = args.date_vn ? String(args.date_vn).trim() : null;
+  if (dateVn && /^(today|yesterday)$/i.test(dateVn)) {
+    const offsetDays = dateVn.toLowerCase() === 'yesterday' ? -1 : 0;
+    const vnNow = new Date(nowMs + 7 * 3600 * 1000 + offsetDays * 86400000);
+    const pad = n => String(n).padStart(2, '0');
+    dateVn = `${vnNow.getUTCFullYear()}-${pad(vnNow.getUTCMonth() + 1)}-${pad(vnNow.getUTCDate())}`;
   }
+  if ((dateVn && !/^\d{4}-\d{2}-\d{2}$/.test(dateVn)) || (dateVn && (args.date_from || args.date_to))) {
+    throw new MisApiError('INVALID_ARGUMENT', 'Use date_vn (YYYY-MM-DD or today/yesterday) or date_from/date_to', 400);
+  }
+  const hasPeriod = Boolean(dateVn || args.date_from || args.date_to);
+  const within = dateBounds(dateVn || args.date_from, dateVn || args.date_to);
+  const maxEvidence = dateVn ? 5 : 3;
+  const maxTransitions = dateVn ? 5 : 3;
+  const previewLen = dateVn ? 140 : 100;
 
   const workspaceRoot = config.workspaceRoot ? path.resolve(config.workspaceRoot) : path.dirname(getExportsRoot(config));
   let snapshot = null;
@@ -857,6 +866,9 @@ export async function queryMyTasks(client, config, args = {}) {
   }
 
   targetUser = enrichTargetUserFromBundles(projectBundles, targetUser);
+  if (!targetUser.id && !targetUser.email) {
+    throw new MisApiError('IDENTITY_UNAVAILABLE', 'No MIS user ID or email was resolved', 422);
+  }
 
   const byStatus = { TODO: 0, IN_PROGRESS: 0, INTERNAL_REVIEW: 0, MENTOR_REVIEW: 0, DONE: 0 };
   const buckets = {
@@ -874,6 +886,8 @@ export async function queryMyTasks(client, config, args = {}) {
   const workedOnDate = [];
   const completedOnDate = [];
   const deadlineOnDate = [];
+  const reviewOnDate = [];
+  const claimedOnDate = [];
 
   for (const bundle of projectBundles) {
     const project = bundle.project || {};
@@ -893,79 +907,92 @@ export async function queryMyTasks(client, config, args = {}) {
           else if (task.status === 'INTERNAL_REVIEW' || task.status === 'MENTOR_REVIEW') buckets.in_review.push(summary);
           else if (task.status === 'DONE' && includeDone) buckets.done.push(summary);
         }
-      } else if (includeClaimable && task.is_claimable && task.status !== 'DONE') {
+      } else if (includeClaimable && task.is_claimable && !task.assignee_id && !task.assignees?.length && task.status !== 'DONE') {
         buckets.claimable_open.push(summary);
       }
 
-      if (dateVn) {
+      if (hasPeriod) {
         const directUserEvidence = [];
         const doneTransitions = [];
+        const reviewTransitions = [];
 
-        if (assigned && task.claimed_at && toVnDate(task.claimed_at) === dateVn) {
-          directUserEvidence.push({
-            source: 'task_claim',
-            type: 'claimed',
-            timestamp_vn: toVnTimestamp(task.claimed_at),
-            content_preview: 'Claimed task'
-          });
+        if (assigned && within(task.claimed_at)) {
+          claimedOnDate.push({ ...compactPeriodTask(summary), claimed_at_vn: toVnTimestamp(task.claimed_at), actor_user_id: null });
         }
 
         for (const c of task.comments || []) {
-          if (toVnDate(c.created_at) !== dateVn) continue;
+          if (!within(c.created_at)) continue;
           const isUserComment = targetUser.id && c.user_id === targetUser.id;
           if (isUserComment) {
             directUserEvidence.push({
               source: 'task_comment',
+              source_id: c.id || null,
               type: c.is_system_log ? 'system_log' : 'comment',
               timestamp_vn: toVnTimestamp(c.created_at),
-              content_preview: String(c.content || '').replace(/<[^>]+>/g, '').slice(0, 180)
+              content_preview: String(c.content || '').replace(/<[^>]+>/g, '').slice(0, previewLen)
             });
           }
-          if (assigned && c.is_system_log && /chuyển trạng thái sang ['"]DONE['"]/i.test(c.content || '')) {
+          const transition = statusTransition(c);
+          if (assigned && transition?.to_status === 'DONE') {
             doneTransitions.push({
-              source: 'task_comment',
+              ...transition,
               type: 'status_done_transition',
-              actor_user_id: c.user_id || null,
               timestamp_vn: toVnTimestamp(c.created_at),
-              content_preview: String(c.content || '').slice(0, 180)
+              content_preview: String(c.content || '').slice(0, previewLen)
             });
+          }
+          if (transition && (assigned || isUserComment)
+            && ['INTERNAL_REVIEW', 'MENTOR_REVIEW', 'DONE'].includes(transition.to_status)) {
+            reviewTransitions.push({ ...transition, timestamp_vn: toVnTimestamp(c.created_at) });
           }
         }
 
         for (const r of task.reports || []) {
-          const ts = r.created_at || r.updated_at;
-          if (toVnDate(ts) !== dateVn) continue;
+          const ts = r.created_at;
+          if (!within(ts)) continue;
           const rUid = r.user_id || r.user?.id || null;
           const rEmail = r.user?.email || null;
-          if (matchesTargetUser(targetUser, rUid, rEmail, r.user?.full_name || null)) {
+          if (matchesTargetUser(targetUser, rUid, rEmail)) {
             directUserEvidence.push({
               source: 'task_report',
+              source_id: r.id || null,
               type: 'report',
               timestamp_vn: toVnTimestamp(ts),
-              content_preview: String(r.report_text || r.file_name || r.report_link_url || 'Submitted report').slice(0, 180)
+              content_preview: String(r.report_text || r.file_name || r.report_link_url || 'Submitted report').slice(0, previewLen)
             });
           }
         }
 
         if (directUserEvidence.length > 0) {
           workedOnDate.push({
-            ...summary,
+            ...compactPeriodTask(summary),
             is_assigned_to_user: assigned,
             evidence_count: directUserEvidence.length,
-            evidence: directUserEvidence
+            ...(directUserEvidence.length > maxEvidence ? { evidence_truncated: true } : {}),
+            evidence: directUserEvidence.slice(0, maxEvidence)
           });
         }
 
         if (doneTransitions.length > 0) {
           completedOnDate.push({
-            ...summary,
-            done_transitions: doneTransitions
+            ...compactPeriodTask(summary),
+            done_transition_count: doneTransitions.length,
+            done_transitions: doneTransitions.slice(0, maxTransitions)
           });
         }
 
-        if (assigned && task.deadline && toVnDate(task.deadline) === dateVn) {
+        if (reviewTransitions.length > 0) {
+          reviewOnDate.push({
+            ...compactPeriodTask(summary),
+            is_assigned_to_user: assigned,
+            transition_count: reviewTransitions.length,
+            transitions: reviewTransitions.slice(0, maxTransitions)
+          });
+        }
+
+        if (assigned && within(task.deadline)) {
           deadlineOnDate.push({
-            ...summary,
+            ...compactPeriodTask(summary),
             evidence_type: 'deadline_only'
           });
         }
@@ -974,14 +1001,21 @@ export async function queryMyTasks(client, config, args = {}) {
   }
 
   const totalAssigned = Object.values(byStatus).reduce((sum, n) => sum + n, 0);
+  const offset = args.offset ?? 0;
+  const limit = args.limit ?? 25;
+  const paginate = items => pageOf(items, offset, limit);
+  const bucketPages = Object.fromEntries(Object.entries(buckets).map(([key, items]) => [key, paginate(items)]));
   const result = {
     sourceMode: snapshot ? 'snapshot' : 'live',
     checkedAtVn: toVnTimestamp(new Date(nowMs).toISOString()),
     timezone: 'Asia/Saigon (+07:00)',
     dataSources: snapshot
       ? [args.snapshot_path]
-      : ['GET /api/v1/auth/me', 'GET /api/v1/projects/', 'GET /api/v1/projects/{project_id}/tasks/'],
-    schemaCaveat: 'MIS backend task and checklist objects do not expose created_at/updated_at/completed_at; date attribution uses only direct timestamps from comments[].created_at, reports[].created_at, claimed_at, and deadline.',
+      : [...(!args.user_id && !args.email ? ['GET /api/v1/auth/me'] : []),
+        args.project_id ? 'GET /api/v1/projects/{project_id}' : 'GET /api/v1/projects/',
+        'GET /api/v1/projects/{project_id}/tasks/'],
+    schemaCaveat: 'Task lists expose current state and visible system comments. DONE events apply to the current assignment cohort; actor IDs identify who logged the transition. Assignment history, formal approval and historical state as of a date are unavailable here. Claim time has no actor ID.',
+    coverage: warnings.length ? 'partial' : 'visible_sources',
     targetUser,
     scannedProjectsCount: projectBundles.length,
     scannedProjects: projectBundles.map(b => ({ id: b.project?.id || null, name: b.project?.name || null })),
@@ -994,20 +1028,31 @@ export async function queryMyTasks(client, config, args = {}) {
       overdueNonDoneCount,
       claimableOpenCount: buckets.claimable_open.length
     },
-    buckets,
+    buckets: Object.fromEntries(Object.entries(bucketPages).map(([key, page]) => [key, page.items])),
+    bucketPagination: Object.fromEntries(Object.entries(bucketPages).map(([key, { items, ...page }]) => [key, page])),
     ...(warnings.length > 0 ? { warnings } : {})
   };
 
-  if (dateVn) {
-    result.dateAnalysis = {
-      date_vn: dateVn,
+  if (hasPeriod) {
+    const groups = {
+      worked_on_date: workedOnDate,
+      completed_on_date: completedOnDate,
+      deadline_on_date: deadlineOnDate,
+      review_on_date: reviewOnDate,
+      claimed_on_date: claimedOnDate
+    };
+    const pages = Object.fromEntries(Object.entries(groups).map(([key, items]) => [key, paginate(items)]));
+    const analysis = {
+      ...(dateVn ? { date_vn: dateVn } : { date_from: args.date_from || null, date_to: args.date_to || null }),
       workedOnDateCount: workedOnDate.length,
       completedOnDateCount: completedOnDate.length,
       deadlineOnDateCount: deadlineOnDate.length,
-      worked_on_date: workedOnDate,
-      completed_on_date: completedOnDate,
-      deadline_on_date: deadlineOnDate
+      reviewOnDateCount: reviewOnDate.length,
+      claimedOnDateCount: claimedOnDate.length,
+      ...Object.fromEntries(Object.entries(pages).map(([key, page]) => [key, page.items])),
+      pagination: Object.fromEntries(Object.entries(pages).map(([key, { items, ...page }]) => [key, page]))
     };
+    result[dateVn ? 'dateAnalysis' : 'periodAnalysis'] = analysis;
   }
 
   return result;

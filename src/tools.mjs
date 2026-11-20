@@ -6,6 +6,7 @@ import { saveEnvToken } from './config.mjs';
 import { extractAccessTokenFromCdp } from './cdp-auth.mjs';
 import { findRunningNativeChromeCdp, inspectJwt } from './auth-manager.mjs';
 import { collectAccountData, queryMyTasks, queryUserLogs } from './collector.mjs';
+import { pageOf, readTask } from './data-access.mjs';
 
 const CHUNK_SIZE = 5 * 1024 * 1024;
 
@@ -150,43 +151,97 @@ export function createToolRegistry(client, config, deps = {}) {
     }, ['project_id'], true, false,
       async args => await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}`)),
 
-    defTool('mis_get_project_members', 'List members and roles of a project (GET /api/v1/projects/{project_id}/members)', {
+    defTool('mis_get_project_members', 'List member user_ids and roles of a project (GET /api/v1/projects/{project_id}/members; returns project_id, user_id, role only without display names/emails)', {
       project_id: strProp('Project UUID', { minLength: 1 })
     }, ['project_id'], true, false,
       async args => await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/members`)),
 
-    defTool('mis_get_project_feed', 'Get activity and comment feed for a project (GET /api/v1/projects/{project_id}/feed)', {
+    defTool('mis_get_project_feed', 'Get raw unpaginated project feed (up to 50 items, display-name only without actor IDs). For recent project activity with actor IDs, pagination, and compact output, prefer mis_get_user_logs with project_id, all_actors=true, compact=true.', {
       project_id: strProp('Project UUID', { minLength: 1 })
     }, ['project_id'], true, false,
       async args => await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/feed`)),
 
-    defTool('mis_get_project_performance', 'Get project KPI and student performance analytics (GET /api/v1/projects/analytics/performance)', {
+    defTool('mis_get_project_performance', 'Get MIS Performance KPIs or task milestones (created, first viewed, accepted, completed) from the Performance API. Task milestone strings are backend-reported for the returned student cohort.', {
       project_id: strProp('Optional project UUID', { minLength: 1 }),
       student_id: strProp('Optional student UUID', { minLength: 1 }),
       date_from: strProp('Optional ISO start date (YYYY-MM-DD)', { minLength: 1 }),
-      date_to: strProp('Optional ISO end date (YYYY-MM-DD)', { minLength: 1 })
+      date_to: strProp('Optional ISO end date (YYYY-MM-DD)', { minLength: 1 }),
+      task_id: strProp('Return only Performance milestone rows for this task. Requires project_id.', { minLength: 1 }),
+      summary_only: boolProp('Return just the backend KPI summary for the selected scope')
     }, [], true, false,
-      async args => await client.request('GET', '/api/v1/projects/analytics/performance', {
-        query: { project_id: args.project_id, student_id: args.student_id, date_from: args.date_from, date_to: args.date_to }
-      })),
+      async args => {
+        if (args.task_id && (!args.project_id || args.summary_only)) {
+          throw new MisApiError('INVALID_ARGUMENT', 'task_id requires project_id and cannot be used with summary_only', 400);
+        }
+        const data = await client.request('GET', '/api/v1/projects/analytics/performance', {
+          query: { project_id: args.project_id, student_id: args.student_id, date_from: args.date_from, date_to: args.date_to }
+        });
+        if (args.summary_only) return { summary: data.summary };
+        if (!args.task_id) return data;
+        return {
+          source: 'GET /api/v1/projects/analytics/performance',
+          task_id: args.task_id,
+          coverage: 'Only Performance rows visible under the supplied filters. Milestone strings are returned as displayed by MIS.',
+          milestones: (data.students || []).flatMap(student => (student.task_details || [])
+            .filter(row => row.task_id === args.task_id && row.project_id === args.project_id)
+            .map(row => ({
+              student_id: student.user_id,
+              created_at_iso: row.created_at_iso ?? null,
+              first_viewed_at_str: row.first_viewed_at_str ?? null,
+              accepted_at_str: row.accepted_at_str ?? null,
+              claimed_at_str: row.claimed_at_str ?? null,
+              completed_at_str: row.completed_at_str ?? null
+            })))
+        };
+      }),
 
     // ── Project Tasks, Checklists & Reports (Read-only) ──
-    defTool('mis_list_tasks', 'List all tasks in a project, optionally filtered by status (GET /api/v1/projects/{project_id}/tasks/)', {
+    defTool('mis_list_tasks', 'Find project tasks by title, assignee or parent (subtasks). Automatically uses compact paginated rows when search/assignee_id/parent_id/offset/limit or compact=true is set.', {
       project_id: strProp('Project UUID', { minLength: 1 }),
-      status: strProp('Optional status filter', { enum: ['TODO', 'IN_PROGRESS', 'INTERNAL_REVIEW', 'MENTOR_REVIEW', 'DONE'] })
+      status: strProp('Server-side status filter', { enum: ['TODO', 'IN_PROGRESS', 'INTERNAL_REVIEW', 'MENTOR_REVIEW', 'DONE'] }),
+      compact: boolProp('Return compact task rows with pagination (auto-enabled when search/assignee_id/parent_id/offset/limit is set)'),
+      search: strProp('Case-insensitive title substring (uses compact view)', { minLength: 1 }),
+      assignee_id: strProp('Filter by current assignee UUID (uses compact view)', { minLength: 1 }),
+      parent_id: strProp('Filter subtasks by parent task UUID (uses compact view)', { minLength: 1 }),
+      offset: intProp('Compact result offset', { minimum: 0 }),
+      limit: intProp('Compact page size (default 25)', { minimum: 1, maximum: 100 })
     }, ['project_id'], true, false,
-      async args => await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/tasks/`, { query: { status: args.status } })),
+      async args => {
+        const hasCompactArgs = [args.search, args.assignee_id, args.parent_id, args.offset, args.limit].some(value => value !== undefined);
+        if (args.compact === false && hasCompactArgs) {
+          throw new MisApiError('INVALID_ARGUMENT', 'Search, assignee, parent and paging require compact=true', 400);
+        }
+        const useCompact = args.compact === true || hasCompactArgs;
+        const items = await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/tasks/`, { query: { status: args.status } });
+        if (!useCompact) return items;
+        const search = args.search?.toLowerCase();
+        const matches = items.filter(task => !task.is_deleted
+          && (!args.parent_id || task.parent_id === args.parent_id)
+          && (!args.assignee_id || task.assignee_id === args.assignee_id || task.assignees?.some(user => user.id === args.assignee_id))
+          && (!search || task.title?.toLowerCase().includes(search)));
+        const page = pageOf(matches, args.offset ?? 0, args.limit ?? 25);
+        return {
+          ...page,
+          items: page.items.map(({ id, title, status, deadline, parent_id }) => ({ id, title, status, deadline, parent_id }))
+        };
+      }),
 
     defTool('mis_list_claimable_tasks', 'List open/claimable tasks in a project (GET /api/v1/projects/{project_id}/tasks/claimable)', {
       project_id: strProp('Project UUID', { minLength: 1 })
     }, ['project_id'], true, false,
       async args => await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/tasks/claimable`)),
 
-    defTool('mis_get_task', 'Get full task details including checklists, reports, and comments (GET /api/v1/projects/{project_id}/tasks/{task_id})', {
-      project_id: strProp('Project UUID', { minLength: 1 }),
-      task_id: strProp('Task UUID', { minLength: 1 })
-    }, ['project_id', 'task_id'], true, false,
-      async args => await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/tasks/${assertSafeSegment(args.task_id, 'task_id')}`)),
+    defTool('mis_get_task', 'Read one task in a single MCP call. Use IDs if known or supply project_name and task_title directly. For details use summary with exact comment_counts from the raw task, checklist rows and report metadata/previews. For who moved it into review and when, use review with actors and +07:00 timestamps. Use full for verbatim comments/reports or history for all recognized transitions and changes.', {
+      project_id: strProp('Project UUID, instead of project_name', { minLength: 1 }),
+      project_name: strProp('Project name, instead of project_id. Exact match preferred.', { minLength: 1 }),
+      task_id: strProp('Task UUID, instead of task_title', { minLength: 1 }),
+      task_title: strProp('Task title, instead of task_id. Exact match preferred.', { minLength: 1 }),
+      view: strProp('summary for task Q&A, review for review transitions only, history for all recognized events, full for raw data (default)', { enum: ['full', 'summary', 'history', 'review'] }),
+      date_from: strProp('History/review start in +07:00 or ISO timestamp with timezone'),
+      date_to: strProp('History/review end in +07:00 or ISO timestamp with timezone'),
+      offset: intProp('History/review offset', { minimum: 0 }),
+      limit: intProp('History/review page size (default 25)', { minimum: 1, maximum: 100 })
+    }, [], true, false, async args => await readTask(client, args)),
 
     defTool('mis_view_task_report_log', 'Read text content of a submitted task report log file (GET .../reports/{report_id}/view-log)', {
       project_id: strProp('Project UUID', { minLength: 1 }),
@@ -210,11 +265,20 @@ export function createToolRegistry(client, config, deps = {}) {
     }, ['project_id'], true, false,
       async args => await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/documents/`)),
 
-    defTool('mis_get_document', 'Get a project document details and AI summary (GET /api/v1/projects/{project_id}/documents/{document_id})', {
-      project_id: strProp('Project UUID', { minLength: 1 }),
+    defTool('mis_get_document', 'Read document details. Use the project UUID for project documents and scope=course for LMS or Gallery documents.', {
+      project_id: strProp('Project UUID, required for project documents', { minLength: 1 }),
+      scope: strProp('Document scope (defaults to project)', { enum: ['project', 'course'] }),
       document_id: strProp('Document UUID', { minLength: 1 })
-    }, ['project_id', 'document_id'], true, false,
-      async args => await client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/documents/${assertSafeSegment(args.document_id, 'document_id')}`)),
+    }, ['document_id'], true, false,
+      async args => {
+        const did = assertSafeSegment(args.document_id, 'document_id');
+        if (args.scope === 'course') {
+          if (args.project_id) throw new MisApiError('INVALID_ARGUMENT', 'project_id is only for project documents', 400);
+          return client.request('GET', `/api/v1/documents/${did}`);
+        }
+        if (!args.project_id) throw new MisApiError('MISSING_ARGUMENT', 'Missing required argument: project_id', 400);
+        return client.request('GET', `/api/v1/projects/${assertSafeSegment(args.project_id, 'project_id')}/documents/${did}`);
+      }),
 
     defTool('mis_download_project_document_file', 'Download a project document file into workspace downloads/ (GET /api/v1/project-documents/{document_id}/file)', {
       document_id: strProp('Document UUID', { minLength: 1 })
@@ -254,16 +318,17 @@ export function createToolRegistry(client, config, deps = {}) {
     }, ['assignment_id'], true, false,
       async args => await client.request('GET', `/api/v1/assignments/${assertSafeSegment(args.assignment_id, 'assignment_id')}`)),
 
-    defTool('mis_list_gallery_videos', 'List public/course gallery videos (GET /api/v1/gallery/videos)', {
+    defTool('mis_list_gallery_videos', 'List public/course gallery videos with server pagination. Select pending for videos in the processing queue visible to this account.', {
       course_id: strProp('Optional course UUID', { minLength: 1 }),
       semester: strProp('Optional semester', { minLength: 1 }),
       search: strProp('Optional search query', { minLength: 1 }),
       filter: strProp('Optional filter', { minLength: 1 }),
       sort_by: strProp('Optional sort field', { minLength: 1 }),
       page: intProp('Page number (>=1)', { minimum: 1 }),
-      page_size: intProp('Page size (1..100)', { minimum: 1, maximum: 100 })
+      page_size: intProp('Page size (1..100)', { minimum: 1, maximum: 100 }),
+      pending: boolProp('List pending gallery videos')
     }, [], true, false,
-      async args => await client.request('GET', '/api/v1/gallery/videos', { query: args })),
+      async ({ pending, ...query }) => await client.request('GET', pending ? '/api/v1/gallery/videos/pending' : '/api/v1/gallery/videos', { query })),
 
     defTool('mis_get_gallery_video', 'Get gallery video details by slug (GET /api/v1/gallery/videos/{slug})', {
       slug: strProp('Video slug', { minLength: 1 })
@@ -294,7 +359,7 @@ export function createToolRegistry(client, config, deps = {}) {
     }, [], true, false,
       async args => await collectAccountData(client, config, args)),
 
-    defTool('mis_get_user_logs', 'Collect/filter full activity, chat comment, report, checklist, and feed timeline for a user (defaults to current account) from live GET APIs or a saved snapshot file', {
+    defTool('mis_get_user_logs', 'Find visible activity by date, participant and project (ai đã làm gì trong dự án). Default user is the current account. Use all_actors for a project timeline and compact for conversational results.', {
       user_id: strProp('Target user UUID (omit to use current user or email)', { minLength: 1 }),
       email: strProp('Target user email address (resolved via lookup/members)', { minLength: 3 }),
       project_id: strProp('Optional project UUID to restrict scan to one project', { minLength: 1 }),
@@ -302,20 +367,27 @@ export function createToolRegistry(client, config, deps = {}) {
       include_system_logs: boolProp('Include system audit/status events is_system_log=true (default true)'),
       include_feed_only_events: boolProp('Include deduplicated project feed events not present in task.comments (default true)'),
       types: strArrayProp('Optional filter array of types: comment, system_log, report, checklist, feed'),
-      date_from: strProp('Optional start date/time filter (YYYY-MM-DD or ISO 8601)', { minLength: 4 }),
-      date_to: strProp('Optional end date/time filter (YYYY-MM-DD or ISO 8601)', { minLength: 4 }),
-      limit: intProp('Max log entries to return (1..5000, default 500)', { minimum: 1, maximum: 5000 }),
+      date_from: strProp('Inclusive start in +07:00 (YYYY-MM-DD) or ISO timestamp with timezone', { minLength: 4 }),
+      date_to: strProp('Inclusive end in +07:00 (YYYY-MM-DD) or ISO timestamp with timezone', { minLength: 4 }),
+      all_actors: boolProp('Include all visible actors. Requires project_id and no other user filter.'),
+      compact: boolProp('Return short previews and omit geo/IP and user email from entries'),
+      offset: intProp('Offset into the matching timeline', { minimum: 0 }),
+      limit: intProp('Max log entries to return (1..5000, default 25 when compact=true, else 500)', { minimum: 1, maximum: 5000 }),
       save_to_file: boolProp('Save matched user timeline JSON into exports/ (default false)')
     }, [], true, false,
       async args => await queryUserLogs(client, config, args)),
 
-    defTool('mis_query_my_tasks', 'Query user tasks across accessible projects for daily check-ins ("hôm nay có task nào cần làm không?") and date-specific work history ("ngày X làm bao nhiêu task?") with strict separation of TODO, IN_PROGRESS, IN_REVIEW, DONE, claimable tasks, and direct timestamp evidence (+07:00)', {
+    defTool('mis_query_my_tasks', 'Query tasks for daily check-in (hôm nay có việc gì), single day activity or weekly progress (tiến độ tuần này). Separate current task status, authored activity, scheduled deadlines, and logged review/DONE transitions (+07:00).', {
       user_id: strProp('Target user UUID (omit for current authenticated user)', { minLength: 1 }),
       email: strProp('Target user email address', { minLength: 3 }),
       project_id: strProp('Optional project UUID to restrict query to one project', { minLength: 1 }),
-      date_vn: strProp('Optional Vietnam date YYYY-MM-DD (+07:00) to inspect tasks with direct work/completion/deadline evidence on that date', { minLength: 10 }),
+      date_vn: strProp('Optional Vietnam date YYYY-MM-DD (+07:00), or "today"/"yesterday", to inspect tasks with direct work/completion/deadline evidence on that date', { minLength: 5 }),
+      date_from: strProp('Start of a period (YYYY-MM-DD +07:00 or ISO timestamp with timezone), instead of date_vn'),
+      date_to: strProp('End of a period (YYYY-MM-DD +07:00 or ISO timestamp with timezone), instead of date_vn'),
+      offset: intProp('Offset applied to each task bucket (counts cover all matches)', { minimum: 0 }),
+      limit: intProp('Page size per task bucket (default 25)', { minimum: 1, maximum: 100 }),
       status: strProp('Optional status filter', { enum: ['TODO', 'IN_PROGRESS', 'INTERNAL_REVIEW', 'MENTOR_REVIEW', 'DONE'] }),
-      include_done: boolProp('Include full DONE task list in buckets.done (default false to keep responses compact)'),
+      include_done: boolProp('Default false — keep false for check-ins and weekly progress (summary counts and periodAnalysis already include DONE tasks)'),
       include_claimable: boolProp('Include open claimable tasks not yet assigned to user (default true)'),
       snapshot_path: strProp('Optional workspace path to full-snapshot.json or manifest.json for offline queries', { minLength: 1 })
     }, [], true, false,

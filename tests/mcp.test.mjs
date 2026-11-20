@@ -50,6 +50,148 @@ test('MCP initialize and tools/list expose well-formed schemas', async () => {
   }
 });
 
+test('history uses +07:00, explicit system transitions and the logged actor', async () => {
+  const logged = { id: 'system', is_system_log: true, content: "Reviewer đã chuyển trạng thái sang 'DONE'", user_id: 'reviewer', created_at: '2026-11-19T17:05:00Z' };
+  const task = {
+    id: 't1', status: 'IN_PROGRESS', assignee_id: 'worker', parent_id: 'parent',
+    comments: [
+      logged,
+      { ...logged, id: 'manual', is_system_log: false, user_id: 'worker' },
+      { ...logged, id: 'report-log', content: "Reviewer đã nộp báo cáo kết quả: yêu cầu chuyển trạng thái sang 'DONE'" },
+      { ...logged, id: 'assignment-log', content: 'Reviewer đã giao việc cho Worker.' },
+      { ...logged, id: 'previous-day', created_at: '2026-11-19T16:59:00Z' }
+    ],
+    reports: [{ user_id: 'worker', updated_at: logged.created_at }],
+    checklists: [{ completed_by_id: 'worker', is_completed: true, updated_at: logged.created_at }]
+  };
+  const srv = createMcpServer({
+    config: {},
+    authManager: null,
+    client: { request: async (method, path) => {
+      assert.equal(method, 'GET');
+      if (path.endsWith('/tasks/t1')) return task;
+      if (path.endsWith('/tasks/')) return [task];
+      if (path.endsWith('/projects/p1')) return { id: 'p1', name: 'Project' };
+      assert.fail(path);
+    } }
+  });
+  const call = async (name, args) => (await srv.dispatch({
+    jsonrpc: '2.0', id: name, method: 'tools/call', params: { name, arguments: args }
+  })).result.structuredContent;
+
+  const history = await call('mis_get_task', { project_id: 'p1', task_id: 't1', view: 'history', date_from: '2026-11-20', date_to: '2026-11-20' });
+  assert.equal(history.data.current_status, 'IN_PROGRESS');
+  assert.deepEqual(history.data.transitions.items.map(row => [row.source_id, row.actor_user_id]), [['system', 'reviewer']]);
+  assert.equal(history.data.transitions.items[0].actor_name, 'Reviewer');
+  assert.equal(history.data.transitions.items[0].timestamp_vn, '2026-11-20 00:05:00 +07:00');
+  assert.deepEqual(history.data.assignment_events.items.map(row => row.source_id), ['assignment-log']);
+  assert.equal(history.data.assignment_events.items[0].actor_name, 'Reviewer');
+  const detail = await call('mis_get_task', { project_id: 'p1', task_id: 't1' });
+  assert.deepEqual(detail.data.comment_counts, { total: 5, manual: 1, system_log: 4, unclassified: 0 });
+
+  const progress = await call('mis_query_my_tasks', { project_id: 'p1', user_id: 'worker', date_vn: '2026-11-20' });
+  assert.equal(progress.data.dateAnalysis.workedOnDateCount, 1);
+  assert.equal(progress.data.dateAnalysis.worked_on_date[0].evidence_count, 1);
+  assert.equal(progress.data.dateAnalysis.completedOnDateCount, 1);
+  assert.equal(progress.data.dateAnalysis.completed_on_date[0].done_transitions[0].actor_user_id, 'reviewer');
+
+  const todayAlias = await call('mis_query_my_tasks', { project_id: 'p1', user_id: 'worker', date_vn: 'today' });
+  assert.match(todayAlias.data.dateAnalysis.date_vn, /^\d{4}-\d{2}-\d{2}$/);
+
+  const multiDay = await call('mis_query_my_tasks', {
+    project_id: 'p1', user_id: 'worker', date_from: '2026-11-19', date_to: '2026-11-20'
+  });
+  assert.ok(multiDay.data.periodAnalysis.worked_on_date[0].evidence.length <= 3);
+
+  const activity = await call('mis_get_user_logs', { project_id: 'p1', user_id: 'worker', date_from: '2026-11-20', include_feed_only_events: false });
+  assert.deepEqual(activity.data.logs.map(row => row.id), ['manual']);
+
+  const invalid = await call('mis_get_task', { project_id: 'p1', task_id: 't1', view: 'history', date_from: '2026-02-30' });
+  assert.equal(invalid.error.code, 'INVALID_ARGUMENT');
+  const children = await call('mis_list_tasks', { project_id: 'p1', compact: true, parent_id: 'parent', limit: 1 });
+  assert.equal(children.data.total, 1);
+  assert.equal(children.data.items[0].id, 't1');
+  assert.equal(children.data.items[0].comments, undefined);
+
+  const autoCompact = await call('mis_list_tasks', { project_id: 'p1', parent_id: 'parent', limit: 1 });
+  assert.equal(autoCompact.ok, true);
+  assert.equal(autoCompact.data.items[0].id, 't1');
+  assert.equal(autoCompact.data.items[0].comments, undefined);
+
+  const badUncompact = await call('mis_list_tasks', { project_id: 'p1', compact: false, parent_id: 'parent' });
+  assert.equal(badUncompact.error.code, 'INVALID_ARGUMENT');
+});
+
+test('Q5 and Q6 use one MCP call per question with raw counts and targeted task detail', async () => {
+  const comment = (id, action, is_system_log = true) => ({
+    id, user_id: 'reviewer', content: `Reviewer đã ${action}`, is_system_log, created_at: '2026-11-19T17:05:00Z'
+  });
+  const task = {
+    id: 't1', title: 'Verify integration', status: 'DONE', deadline: '2026-11-12T00:00:00Z',
+    comments: [
+      comment('review', "chuyển trạng thái sang 'INTERNAL_REVIEW'"),
+      comment('mentor', "chuyển trạng thái sang 'MENTOR_REVIEW'"),
+      comment('done', "chuyển trạng thái sang 'DONE'"),
+      ...Array.from({ length: 10 }, (_, i) => comment(`check-${i}`, 'đánh dấu hoàn thành checklist')),
+      ...Array.from({ length: 7 }, (_, i) => comment(`submit-${i}`, 'nộp báo cáo kết quả'))
+    ],
+    checklists: Array.from({ length: 7 }, (_, i) => ({ id: `c${i}`, title: `Check ${i}`, is_completed: true })),
+    reports: Array.from({ length: 3 }, (_, i) => ({ id: `r${i}`, report_text: 'evidence '.repeat(3000), file_name: 'proof.log' }))
+  };
+  const paths = [];
+  const srv = createMcpServer({
+    config: { readOnly: true },
+    authManager: null,
+    client: { request: async (method, path) => {
+      assert.equal(method, 'GET');
+      paths.push(path);
+      if (path === '/api/v1/projects/') return [{ id: 'p1', name: 'Integration' }];
+      if (path === '/api/v1/projects/p1/tasks/') return [{ id: 't1', title: task.title }, { id: 't2', title: task.title + ' follow-up' }];
+      if (path === '/api/v1/projects/p1/tasks/t1') return task;
+      assert.fail(path);
+    } }
+  });
+  const call = async args => (await srv.dispatch({
+    jsonrpc: '2.0', id: 'task', method: 'tools/call', params: { name: 'mis_get_task', arguments: args }
+  })).result;
+  const q5 = await call({ project_name: 'integration', task_title: task.title, view: 'summary' });
+  assert.equal(q5.isError, false, q5.structuredContent.error?.message);
+  assert.deepEqual(paths.splice(0), ['/api/v1/projects/', '/api/v1/projects/p1/tasks/', '/api/v1/projects/p1/tasks/t1']);
+  assert.deepEqual(q5.structuredContent.data.comment_counts, { total: 20, manual: 0, system_log: 20, unclassified: 0 });
+  assert.equal(q5.structuredContent.data.checklists.length, 7);
+  assert.equal(q5.structuredContent.data.reports.length, 3);
+  assert.equal(q5.structuredContent.data.deadline_vn, '2026-11-12 07:00:00 +07:00');
+  assert.equal(q5.structuredContent.data.reports[0].file_name, 'proof.log');
+  assert.equal(q5.structuredContent.data.reports[0].report_text_truncated, true);
+
+  const byId = { project_id: 'p1', task_id: 't1' };
+  const q6 = await call({ ...byId, view: 'review', limit: 1 });
+  assert.equal(q6.isError, false, q6.structuredContent.error?.message);
+  assert.deepEqual(paths.splice(0), ['/api/v1/projects/p1/tasks/t1']);
+  const review = q6.structuredContent.data;
+  assert.equal(review.transitions.total, 2);
+  assert.equal(review.transitions.next_offset, 1);
+  assert.equal(review.transitions.items[0].actor_name, 'Reviewer');
+  assert.equal(review.transitions.items[0].timestamp_vn, '2026-11-20 00:05:00 +07:00');
+  assert.equal(review.checklist_events, undefined);
+  assert.equal(review.assignment_events, undefined);
+
+  const grouped = await call({ ...byId, view: 'history' });
+  const logGroups = grouped.structuredContent.data;
+  assert.equal(logGroups.transitions.total + logGroups.assignment_events.total + logGroups.checklist_events.total, 13);
+
+  const full = await call(byId);
+  assert.deepEqual(full.structuredContent.data.comments, task.comments);
+  assert.deepEqual(full.structuredContent.data.reports, task.reports);
+  assert.deepEqual(full.structuredContent.data.comment_counts, q5.structuredContent.data.comment_counts);
+  assert.deepEqual(JSON.parse(full.content[0].text), full.structuredContent);
+  assert.ok(q5.content[0].text.length < full.content[0].text.length / 4);
+
+  const ambiguous = await call({ project_id: 'p1', task_title: 'Verify', view: 'summary' });
+  assert.equal(ambiguous.structuredContent.error.code, 'AMBIGUOUS_TASK');
+  assert.deepEqual(paths, ['/api/v1/projects/p1/tasks/t1', '/api/v1/projects/p1/tasks/t1', '/api/v1/projects/p1/tasks/']);
+});
+
 test('MCP attaches Bearer token on requests and supports read/write routing against local mock', async t => {
   const mock = await withMockServer(async (req, res, captured) => {
     res.setHeader('Content-Type', 'application/json');
@@ -378,4 +520,21 @@ test('mis_collect_account_data collects account scope via GET-only and mis_get_u
   assert.equal(qData.dateAnalysis.workedOnDateCount, 1);
   assert.equal(qData.dateAnalysis.worked_on_date[0].task_id, 't1');
   assert.equal(qData.dateAnalysis.worked_on_date[0].evidence_count, 2); // c2 + r1 on 2026-11-11
+
+  const compactTimeline = await srv.dispatch({
+    jsonrpc: '2.0',
+    id: 6,
+    method: 'tools/call',
+    params: {
+      name: 'mis_get_user_logs',
+      arguments: {
+        snapshot_path: manifest.files.manifest,
+        project_id: 'p1',
+        all_actors: true,
+        compact: true
+      }
+    }
+  });
+  assert.equal(compactTimeline.result.isError, false);
+  assert.ok(compactTimeline.result.structuredContent.data.logs.length <= 25);
 });

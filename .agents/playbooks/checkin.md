@@ -1,12 +1,13 @@
 # MIS Check-in & Natural Task Q&A Playbook
 
-Use when the user asks in natural language to check in on their MIS tasks, see what needs doing today, or inspect what tasks they worked on or completed on a specific date (`"check-in dữ liệu MIS"`, `"hôm nay có task nào cần làm không"`, `"ngày X tao làm bao nhiêu task"`, `"còn việc gì chưa xong"`).
+Use when the user asks in natural language to check in on their MIS tasks, see what needs doing today, inspect what tasks they worked on or completed on a specific date, or review weekly progress (`"check-in dữ liệu MIS"`, `"hôm nay có task nào cần làm không"`, `"ngày X tao làm bao nhiêu task"`, `"hôm qua tôi đã làm"`, `"tiến độ từ đầu tuần tới hôm nay"`, `"còn việc gì chưa xong"`).
 
 1. **Direct Read-Only MCP Query (Zero Source Pre-Reads):**
-   - Call `mis_query_my_tasks` directly (strictly read-only `GET`):
-     - For daily check-in / *"hôm nay có task nào cần làm không?"*: call `mis_query_my_tasks({ date_vn: "<today YYYY-MM-DD in +07:00>" })`.
-     - For a specific date *"Ngày X tao làm bao nhiêu task, gồm những task nào?"*: call `mis_query_my_tasks({ date_vn: "YYYY-MM-DD" })`.
-   - Do **not** pre-read `src/` source or `context/STATE.md` while MCP is healthy. If MCP returns `SESSION_EXPIRED` or `401`, escalate to [onboarding-auth.md](onboarding-auth.md).
+   - Call `mis_query_my_tasks` directly (strictly read-only `GET`) and **keep `include_done` omitted/`false`** (`summary.doneCount`, `dateAnalysis`, and `periodAnalysis` already cover `DONE` tasks):
+     - For daily check-in / *"hôm nay có task nào cần làm không?"*: call `mis_query_my_tasks({ date_vn: "today" })` (or exact `YYYY-MM-DD` in `+07:00`).
+     - For a specific date *"Ngày X / hôm qua làm và hoàn thành những task nào?"*: call `mis_query_my_tasks({ date_vn: "YYYY-MM-DD" })` (or `"yesterday"`).
+     - For weekly / date-range progress *"Tiến độ từ đầu tuần tới hôm nay thế nào?"*: call `mis_query_my_tasks({ date_from: "<monday YYYY-MM-DD>", date_to: "<today YYYY-MM-DD>" })` (keeping `include_done` omitted/`false`).
+   - Answer directly from the returned MCP payload without writing scratch scripts or pre-reading `src/` / `context/STATE.md`. If MCP returns `SESSION_EXPIRED` or `401`, escalate to [onboarding-auth.md](onboarding-auth.md).
 2. **Strict Status & Evidence Separation (Never Infer Without Evidence):**
    - Always separate:
      - **Task được giao chưa làm (`TODO`)**
@@ -14,11 +15,13 @@ Use when the user asks in natural language to check in on their MIS tasks, see w
      - **Task đang chờ review (`INTERNAL_REVIEW` / `MENTOR_REVIEW`)**
      - **Task đã hoàn thành (`DONE`)**
      - **Việc mở có thể nhận (`claimable_open`)**
-   - For date-specific questions (`date_vn`), separate strictly:
-     - **`worked_on_date`**: tasks with direct user-attributed timestamps on `date_vn` (`comments[].created_at`, `reports[].created_at`, or `claimed_at`).
-     - **`completed_on_date`**: tasks with a direct `DONE` status transition log on `date_vn` (distinguishing approver vs assignee).
-     - **`deadline_on_date`**: tasks due on `date_vn` (`deadline_only` — NEVER count as "worked on that day" without activity evidence).
-   - State `schemaCaveat` transparently whenever the user asks about creation/completion dates not backed by explicit logs.
+   - For date-specific or period questions (`date_vn` or `date_from`/`date_to`), separate strictly:
+     - **`worked_on_date`**: tasks with direct user-attributed timestamps in the window (`comments[].created_at`, system logs with user's `user_id`, or `reports[].created_at`).
+     - **`completed_on_date`**: tasks in the current assignment cohort with a direct `DONE` status transition log in the window (distinguishing the logged transition actor from the current assignee; do not claim formal approval unless separately recorded).
+     - **`review_on_date`**: tasks with explicit `INTERNAL_REVIEW` / `MENTOR_REVIEW` / `DONE` status transition logs in the window.
+     - **`claimed_on_date`**: claim timestamps on currently assigned tasks (the API supplies no claim actor ID).
+     - **`deadline_on_date`**: tasks due in the window (`deadline_only` — NEVER count as "worked on that day" without activity evidence).
+   - State `schemaCaveat` and `coverage` limits transparently (current assignment cohort scope, no task `created_at`/`completed_at` fields, and no formal approval ledger).
 3. **Required Reply Elements:**
-   - Include task list (with project name & deadline in `+07:00`), exact counts per bucket, status, and verified data source (`sourceMode`, `dataSources`, `checkedAtVn`).
+   - Include task list (with project name & deadline in `+07:00`), exact counts per bucket/period category, status, and verified data source (`sourceMode`, `dataSources`, `checkedAtVn`).
    - Never mutate live MIS data or edit workspace files during a check-in.
