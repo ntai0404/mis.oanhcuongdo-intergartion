@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createToolRegistry } from '../src/tools.mjs';
@@ -27,6 +28,7 @@ test('Required Specific Agent workspace structure exists and no placeholder .age
     'package.json',
     '.env.example',
     '.gitignore',
+    'docs/SPECIFIC_AGENT_TEMPLATE.md',
     'docs/WORKSPACE_STRUCTURE.md',
     'docs/MIS-API-REFERENCE.md',
     'docs/MIS-UI-AND-MCP-BLUEPRINT.md',
@@ -48,18 +50,39 @@ test('Required Specific Agent workspace structure exists and no placeholder .age
     'src/auth-manager.mjs',
     'src/mcp-server.mjs',
     'src/tools.mjs',
+    'src/data-access.mjs',
     'src/collector.mjs',
     'src/client.mjs',
     'src/config.mjs',
     'src/cdp-auth.mjs',
+    'tests/mcp.test.mjs',
+    'tests/workspace-contract.test.mjs',
     'tests/onboarding.test.mjs',
-    'tests/auth-session.test.mjs'
+    'tests/auth-session.test.mjs',
+    'tests/live-readonly.test.mjs'
   ];
 
   for (const rel of required) {
     assert.equal(fs.existsSync(path.join(ROOT, rel)), true, `Missing required file: ${rel}`);
   }
   assert.equal(fs.existsSync(path.join(ROOT, '.agents', 'agents')), false, 'Placeholder .agents/agents should not exist');
+});
+
+test('Global mcp_config.json matches live src/mcp-server.mjs when configured for this checkout', () => {
+  const cfgPath = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+  if (!fs.existsSync(cfgPath)) return;
+  let cfg;
+  try {
+    cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  } catch {
+    return;
+  }
+  const srv = cfg?.mcpServers?.mis_matrix;
+  if (!srv || !Array.isArray(srv.args) || !srv.args[0]) return;
+  const configured = path.resolve(String(srv.args[0]));
+  if (path.resolve(path.dirname(path.dirname(configured))) !== ROOT) return;
+  assert.equal(configured, path.resolve(ROOT, 'src', 'mcp-server.mjs'));
+  assert.equal(fs.existsSync(configured), true);
 });
 
 test('AGENTS.md respects size budget and declares poteto-mode routing and guardrails', () => {
@@ -95,6 +118,7 @@ test('All relative markdown links across handbook, playbooks, skills, scripts do
   const mdFiles = [
     path.join(ROOT, 'AGENTS.md'),
     path.join(ROOT, 'README.md'),
+    path.join(ROOT, 'docs', 'SPECIFIC_AGENT_TEMPLATE.md'),
     path.join(ROOT, 'docs', 'WORKSPACE_STRUCTURE.md'),
     path.join(ROOT, 'scripts', 'README.md'),
     path.join(ROOT, 'scripts', 'legacy', 'MANIFEST.md'),
@@ -152,7 +176,87 @@ test('Active scripts use portable paths and .gitignore protects sensitive/local 
   const gitignore = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8')
     .split(/\r?\n/)
     .map(l => l.trim());
-  for (const rule of ['.env', '.env.*', '!.env.example', 'secrets/', 'node_modules/', 'downloads/', 'exports/', 'context/', 'records/', 'reports/', 'scripts/legacy/*.mjs', '.agents/skills/browse-open/']) {
+  for (const rule of ['.env', '.env.*', '!.env.example', 'secrets/', 'node_modules/', '.local/', 'downloads/', 'exports/', 'context/', 'records/', 'reports/', 'scripts/legacy/*.mjs', '.agents/skills/browse-open/']) {
     assert.ok(gitignore.includes(rule), `.gitignore missing ${rule}`);
   }
+});
+
+function unwrapArgPath(rawVal) {
+  let s = String(rawVal || '').trim();
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+    try {
+      s = String(JSON.parse(s));
+    } catch {
+      s = s.slice(1, -1);
+    }
+  }
+  return s.replace(/\\/g, '/').toLowerCase();
+}
+
+export function auditPlaybookReadBeforeExecution(transcriptEvents, expectedPlaybook) {
+  const targetSuffix = `.agents/playbooks/${expectedPlaybook}`.toLowerCase();
+  let playbookReadStep = null;
+  let firstExecStep = null;
+
+  for (let idx = 0; idx < transcriptEvents.length; idx++) {
+    const ev = transcriptEvents[idx] || {};
+    const step = Number.isInteger(ev.step_index) ? ev.step_index : idx;
+    for (const tc of ev.tool_calls || []) {
+      const tname = tc?.name || '';
+      const args = tc?.args || {};
+      if (tname === 'read_file') {
+        const normPath = unwrapArgPath(args.Path);
+        if (normPath.endsWith(targetSuffix)) {
+          if (playbookReadStep === null) playbookReadStep = step;
+          continue;
+        }
+        if (!normPath.includes('/.agents/') && !normPath.endsWith('/agents.md')) {
+          if (firstExecStep === null) firstExecStep = [step, `read_file:${normPath}`];
+        }
+      } else if (['run_command', 'call_mcp_tool', 'edit_file', 'write_file', 'send_message'].includes(tname)) {
+        if (firstExecStep === null) firstExecStep = [step, tname];
+      }
+    }
+  }
+
+  if (playbookReadStep === null) {
+    return [false, `UNREAD_CLAIMED_PLAYBOOK: ${expectedPlaybook} was never opened via read_file`];
+  }
+  if (firstExecStep !== null && playbookReadStep > firstExecStep[0]) {
+    return [
+      false,
+      `READ_AFTER_EXECUTION: ${expectedPlaybook} read at step ${playbookReadStep} after ${firstExecStep[1]} at step ${firstExecStep[0]}`
+    ];
+  }
+  return [true, `PASS: ${expectedPlaybook} read at step ${playbookReadStep} before execution`];
+}
+
+test('Transcript Read-Playbook-First audit catches unread and late-read playbook regressions', () => {
+  const unreadEvents = [
+    { step_index: 1, tool_calls: [{ name: 'read_file', args: { Path: '"c:\\\\repo\\\\AGENTS.md"' } }] },
+    { step_index: 3, tool_calls: [{ name: 'read_file', args: { Path: '"c:\\\\repo\\\\tests\\\\workspace-contract.test.mjs"' } }] },
+    { step_index: 5, tool_calls: [{ name: 'run_command', args: { CommandLine: 'npm test' } }] },
+    { step_index: 7, tool_calls: [{ name: 'send_message', args: { Message: 'Applied investigation.md' } }] }
+  ];
+  const [okUnread, msgUnread] = auditPlaybookReadBeforeExecution(unreadEvents, 'investigation.md');
+  assert.equal(okUnread, false);
+  assert.ok(msgUnread.includes('UNREAD_CLAIMED_PLAYBOOK'));
+
+  const lateEvents = [
+    { step_index: 1, tool_calls: [{ name: 'run_command', args: { CommandLine: 'dir' } }] },
+    { step_index: 3, tool_calls: [{ name: 'read_file', args: { Path: 'c:/repo/.agents/playbooks/checkin.md' } }] }
+  ];
+  const [okLate, msgLate] = auditPlaybookReadBeforeExecution(lateEvents, 'checkin.md');
+  assert.equal(okLate, false);
+  assert.ok(msgLate.includes('READ_AFTER_EXECUTION'));
+
+  const validEvents = [
+    { step_index: 1, tool_calls: [{ name: 'read_file', args: { Path: '"c:\\\\repo\\\\AGENTS.md"' } }] },
+    { step_index: 3, tool_calls: [{ name: 'read_file', args: { Path: '"c:\\\\repo\\\\.agents\\\\playbooks\\\\investigation.md"' } }] },
+    { step_index: 5, tool_calls: [{ name: 'read_file', args: { Path: '"c:\\\\repo\\\\tests\\\\workspace-contract.test.mjs"' } }] },
+    { step_index: 7, tool_calls: [{ name: 'run_command', args: { CommandLine: 'npm test' } }] }
+  ];
+  const [okValid, msgValid] = auditPlaybookReadBeforeExecution(validEvents, 'investigation.md');
+  assert.equal(okValid, true);
+  assert.ok(msgValid.startsWith('PASS:'));
 });

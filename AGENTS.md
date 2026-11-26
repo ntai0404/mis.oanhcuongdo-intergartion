@@ -44,9 +44,9 @@ Classify every natural-language request (no `/skill` required) and route cleanly
 ## 2. Workspace Map (Read on Demand)
 
 - **Context (`context/` — gitignored local state):** [PROFILE.md](context/PROFILE.md), [STATE.md](context/STATE.md), [DECISIONS.md](context/DECISIONS.md), [domain-overview.md](context/domain-overview.md), [directory.md](context/directory.md), `handoffs/`.
-- **Application & MCP Server (`src/` — Node.js `>=22`, zero deps):** [`setup.mjs`](setup.mjs), [`onboarding.mjs`](src/onboarding.mjs), [`auth-manager.mjs`](src/auth-manager.mjs), [`mcp-server.mjs`](src/mcp-server.mjs), [`tools.mjs`](src/tools.mjs) (49 tools: 31 read-only, 18 write), [`collector.mjs`](src/collector.mjs), [`client.mjs`](src/client.mjs), [`config.mjs`](src/config.mjs), [`cdp-auth.mjs`](src/cdp-auth.mjs).
+- **Application & MCP Server (`src/` — Node.js `>=22`, zero deps):** [`setup.mjs`](setup.mjs), [`onboarding.mjs`](src/onboarding.mjs), [`auth-manager.mjs`](src/auth-manager.mjs), [`mcp-server.mjs`](src/mcp-server.mjs), [`tools.mjs`](src/tools.mjs) (49 tools: 31 read-only, 18 write), [`data-access.mjs`](src/data-access.mjs), [`collector.mjs`](src/collector.mjs), [`client.mjs`](src/client.mjs), [`config.mjs`](src/config.mjs), [`cdp-auth.mjs`](src/cdp-auth.mjs).
 - **Tools & Scripts (`scripts/`):** Active doc builders in [`scripts/README.md`](scripts/README.md); archived one-off CDP scripts in [`scripts/legacy/MANIFEST.md`](scripts/legacy/MANIFEST.md).
-- **Docs, Evidence & Tests:** [`docs/WORKSPACE_STRUCTURE.md`](docs/WORKSPACE_STRUCTURE.md), [`docs/MIS-API-REFERENCE.md`](docs/MIS-API-REFERENCE.md), [`docs/MIS-UI-AND-MCP-BLUEPRINT.md`](docs/MIS-UI-AND-MCP-BLUEPRINT.md), [`records/decisions.tsv`](records/decisions.tsv), `reports/`, `exports/`, `tests/`.
+- **Docs, Evidence & Tests:** [`docs/SPECIFIC_AGENT_TEMPLATE.md`](docs/SPECIFIC_AGENT_TEMPLATE.md), [`docs/WORKSPACE_STRUCTURE.md`](docs/WORKSPACE_STRUCTURE.md), [`docs/MIS-API-REFERENCE.md`](docs/MIS-API-REFERENCE.md), [`docs/MIS-UI-AND-MCP-BLUEPRINT.md`](docs/MIS-UI-AND-MCP-BLUEPRINT.md), [`records/decisions.tsv`](records/decisions.tsv), `reports/`, `exports/`, `tests/`.
 - *(Subagent role files `.agents/agents/` are intentionally omitted until an active multi-agent workflow needs them.)*
 
 ## 3. Hard Safety & Evidence Rules

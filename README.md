@@ -4,15 +4,15 @@ Workspace Specific AI Agent độc lập và MCP server chuẩn stdio (Node.js `
 
 ## Kiến trúc Workspace
 
-Xem chi tiết sơ đồ thư mục và quy chuẩn tại [AGENTS.md](AGENTS.md) và [docs/WORKSPACE_STRUCTURE.md](docs/WORKSPACE_STRUCTURE.md):
+Xem chi tiết sơ đồ thư mục và quy chuẩn tại [AGENTS.md](AGENTS.md), [docs/WORKSPACE_STRUCTURE.md](docs/WORKSPACE_STRUCTURE.md) và [docs/SPECIFIC_AGENT_TEMPLATE.md](docs/SPECIFIC_AGENT_TEMPLATE.md):
 
 - `AGENTS.md` — Always-on handbook (`poteto-mode`: playbook routing + `figure-it-out` fallback + safety/evidence gates).
 - `setup.mjs` & `src/onboarding.mjs` — Entrypoint cài đặt 1 lệnh (`node setup.mjs`), bắt buộc dùng `/browse-open` khi cần mở Native Chrome xác thực, tự khởi tạo `context/` & `.env.mis` an toàn, tự merge `mis_matrix` vào `~/.gemini/config/mcp_config.json` (bảo toàn các MCP khác) và chạy read-only smoke test.
-- `.agents/playbooks/` & `.agents/skills/` — Quy trình chuẩn (`collect-account-data`, `investigation`, `onboarding-auth`, `verify-and-evidence`, `session-pickup`, `pause-safely`) và năng lực tái sử dụng (`mis-account-collector`, `mis-project-ops`, `verify-evidence`).
+- `.agents/playbooks/` & `.agents/skills/` — Quy trình chuẩn (`checkin`, `collect-account-data`, `investigation`, `onboarding-auth`, `verify-and-evidence`, `session-pickup`, `pause-safely`) và năng lực tái sử dụng (`mis-account-collector`, `mis-project-ops`, `verify-evidence`).
 - `context/` — `PROFILE.md`, `STATE.md`, `DECISIONS.md`, `domain-overview.md`, `directory.md` và `handoffs/` *(gitignored; chỉ cập nhật theo yêu cầu người dùng)*.
-- `src/` — Mã nguồn MCP server `mis_matrix` (`48` tools: `30` read-only, `18` write/action).
+- `src/` — Mã nguồn MCP server `mis_matrix` (`49` tools: `31` read-only, `18` write/action), `auth-manager.mjs` (API-first session recovery) và `data-access.mjs` (`mis_query_my_tasks`).
 - `scripts/` — Tiện ích tạo tài liệu ([scripts/README.md](scripts/README.md)) và lưu trữ có kiểm soát `scripts/legacy/` ([scripts/legacy/MANIFEST.md](scripts/legacy/MANIFEST.md)).
-- `docs/`, `reports/`, `exports/`, `records/`, `tests/` — Tài liệu OpenAPI/UI, snapshot khảo sát, dữ liệu export theo account, decision log và bộ test.
+- `docs/`, `reports/`, `exports/`, `records/`, `tests/` — Tài liệu kiến trúc & OpenAPI/UI, snapshot khảo sát, dữ liệu export theo account, decision log và bộ test.
 
 ---
 
@@ -74,9 +74,10 @@ Xem mẫu tại [.env.example](.env.example):
 ## Chạy kiểm thử
 
 ```powershell
-npm test                  # Tất cả unit, contract & onboarding tests (mock local, không chạm web thật)
+npm test                  # Tất cả unit, contract, onboarding & auth tests (mock local, không chạm web thật)
 npm run test:mcp          # Chỉ MCP tool/client tests
 npm run test:contract     # Chỉ workspace contract tests
 npm run test:onboarding   # Chỉ onboarding/setup idempotency & /browse-open tests
+npm run test:auth         # Chỉ AuthSessionManager API-first & silent recovery tests
 npm run test:live-readonly # Live GET-only verification (MIS_READ_ONLY enforced trên mis.oanhcuongdo.com)
 ```

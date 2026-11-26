@@ -11,18 +11,22 @@ secrets/
 # Dependencies
 node_modules/
 
-# Local personal context, operational records, private crawls/screenshots, exports, downloads, and legacy one-off scripts
+# Local personal context, operational records, private crawls/screenshots, exports, downloads, runtime cache, and legacy one-off scripts
+.local/
 context/
 records/
 reports/
 exports/
 downloads/
+tmp/
 scripts/legacy/*.mjs
 .agents/skills/browse-open/
 
 # OS / editor / temporary noise
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
 *.tmp
 *.bak
 *.log
