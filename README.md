@@ -42,9 +42,11 @@ node setup.mjs
 4. Tự merge entry `mis_matrix` vào `~/.gemini/config/mcp_config.json` (bảo toàn nguyên vẹn `browse_open`, `webex_web` và các MCP khác).
 5. Chạy live **read-only** stdio smoke test với `MIS_READ_ONLY=1` (`mis_health`, `mis_get_me`, `mis_list_projects` và xác minh `mis_create_task` bị chặn bởi `READ_ONLY_MODE`).
 
-### 3. Reload IDE và sử dụng
+### 3. Mở workspace trên bất kỳ AI Agent Framework nào (Zero-Config hoặc MCP)
 
-Mở thư mục vừa clone trong Antigravity IDE (reload/restart IDE nếu đang mở sẵn) để nạp `AGENTS.md`, `.agents/` và MCP `mis_matrix`.
+- **Zero-Config trên mọi AI Agent Framework (Codex, Claude Code, OpenCode, Cursor, CLI agents):** Mở trực tiếp thư mục này làm workspace. Ngay cả khi chưa đăng ký MCP server trong client, agent đọc [`AGENTS.md`](AGENTS.md) và [`.agents/playbooks/checkin.md`](.agents/playbooks/checkin.md) sẽ tự động gọi CLI runner tích hợp sẵn (`node src/mcp-server.mjs <tool_name> [--param value ...]`) ngay từ lượt đầu tiên bằng token trong `.env.mis`.
+- **Antigravity IDE:** Được `node setup.mjs` tự cấu hình (`~/.gemini/config/mcp_config.json`); reload/restart IDE nếu đang mở sẵn để khởi động MCP `mis_matrix`.
+- **Đăng ký MCP tùy chọn cho Cursor / Claude Desktop / MCP client khác:** Truyền `--mcp-config <path>` cho `node setup.mjs`, hoặc chạy `agy mcp add mis_matrix -- node "<path-to-repo>/src/mcp-server.mjs"`.
 
 ### Các cờ tùy chọn của `node setup.mjs`
 

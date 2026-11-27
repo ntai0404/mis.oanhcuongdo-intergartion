@@ -8,7 +8,7 @@ description: >-
 
 # MIS Project Operations Skill
 
-Covers day-to-day project/task/document workflows implemented in [src/tools.mjs](../../../src/tools.mjs) (`31` read-only tools, `18` write tools).
+Covers day-to-day project/task/document workflows implemented in [src/tools.mjs](../../../src/tools.mjs) (`31` read-only tools, `18` write tools), invokable either via `mis_matrix` MCP tools if mounted or via `node src/mcp-server.mjs <tool_name> [--param value ...]` on any harness where MCP is not registered.
 
 ## 1. Read-Only First
 

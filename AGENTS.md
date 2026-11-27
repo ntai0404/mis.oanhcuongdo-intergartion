@@ -16,13 +16,15 @@ Classify every natural-language request (no `/skill` required) and route cleanly
    - **Pause & handoff** (`"tạm dừng"`, `"pause"`, stop mid-flight): read & follow [.agents/playbooks/pause-safely.md](.agents/playbooks/pause-safely.md).
    - **Hard Prerequisite (`Read-Playbook-First`):** When a playbook matches, call `read_file` on `.agents/playbooks/<name>.md` **BEFORE** running task/investigation tools (`run_command`, `call_mcp_tool`, `edit_file`, `write_file`) or inspecting target files, and follow its steps verbatim.
 
-2. **Live MCP Fast-Path vs `figure-it-out` Mode:**
-   - **Healthy Read-Only `mis_matrix` Fast-Path:** Never pre-read `src/` or `context/STATE.md` for routine MIS queries; answer directly from compact MCP outputs without writing scratch scripts when the data is already present:
+2. **Live Operational Fast-Path (Cross-Harness: MCP-First, Direct-CLI Fallback) vs `figure-it-out` Mode:**
+   - **Healthy Read-Only `mis_matrix` Fast-Path:** Treat `mis_matrix` as a black-box operational API—never pre-read `src/` or `context/STATE.md` for routine MIS queries, and answer directly from compact tool outputs without writing scratch scripts:
+     - **Harness with `mis_matrix` MCP mounted (e.g. Antigravity):** Call `mis_matrix` MCP tools directly (read only the minimal `<appDataDir>\mcp\mis_matrix\<tool>.json` schema if your harness uses lazy schemas).
+     - **Harness without `mis_matrix` MCP mounted (e.g. Codex, Claude Code, Cursor, OpenCode, or any zero-config CLI/IDE):** Do **NOT** look for `<appDataDir>\mcp\mis_matrix\*.json` and do **NOT** report `BLOCKED` just because MCP is unmounted. Invoke the exact same tool directly via the built-in CLI runner: `node src/mcp-server.mjs <tool_name> [--param value ...]` (e.g. `node src/mcp-server.mjs mis_query_my_tasks --date_vn today`). If a first shell call hits a transient sandbox/helper startup error (such as Windows `helper_unknown_error: setup refresh had errors`), retry the command once before diagnosing connectivity.
      - *Daily / specific-date / weekly progress:* `mis_query_my_tasks` (`date_vn: "<YYYY-MM-DD>"` or `"today"`/`"yesterday"`, or `date_from`/`date_to`; keep `include_done` omitted/`false`).
      - *Recent project activity (`"dự án X có hoạt động gì gần đây"`):* `mis_list_projects` -> `mis_get_user_logs({ project_id, all_actors: true, compact: true, limit: 25 })` (do NOT dump raw `mis_list_tasks` or rely solely on `mis_get_project_feed`).
      - *One task's details:* Call `mis_get_task({ project_name, task_title, view: "summary" })` directly or use known IDs. Report `comment_counts` from the raw task, checklist/report data and the `+07:00` deadline. Use `view: "full"` for original content.
      - *Task review / transition / assignment history (`"ai đưa task vào review và khi nào"`, `"ai giao task"`):* Call `mis_get_task({ project_name, task_title, view: "review" })` for review or use `view: "history"` for other changes. Use actor, time and coverage from that response. Fetch more pages if needed.
-     - If MCP fails or returns `401`, escalate to [.agents/playbooks/investigation.md](.agents/playbooks/investigation.md) or [.agents/playbooks/onboarding-auth.md](.agents/playbooks/onboarding-auth.md).
+     - If the live call itself fails or returns `401`, escalate to [.agents/playbooks/investigation.md](.agents/playbooks/investigation.md) or [.agents/playbooks/onboarding-auth.md](.agents/playbooks/onboarding-auth.md).
    - **No Matching Playbook → `figure-it-out` Mode:** Never refuse or limit tasks to predefined skills. Run the 3-step loop within Section 3 bounds:
      1. **Inspect first:** Read target source/config/snapshot files or live `GET` outputs directly before proposing or acting.
      2. **Execute minimally & safely:** Prefer read-only analysis; apply scoped code/file changes only when asked; write to `mis.oanhcuongdo.com` only with explicit authorization.
@@ -38,6 +40,7 @@ Classify every natural-language request (no `/skill` required) and route cleanly
 4. **Anti-Shortcut & Personal Context Guards:**
    - **Playbook / Skill Verification Gate:** NEVER claim you followed or applied a playbook or skill unless `read_file` actually opened it **prior to** task execution in the current session.
    - **`context/STATE.md` is historical, NOT live proof:** NEVER treat `STATE.md` as live state or substitute stale data when a live check returns `BLOCKED`.
+   - **Live Failure ≠ Verified Fallback (No Cold-Start False `BLOCKED`):** Never report `BLOCKED` merely because `mis_matrix` MCP is not registered in the current harness or a first sandbox shell command had a transient helper refresh glitch—use `node src/mcp-server.mjs <tool_name> ...` (and retry once on sandbox helper startup errors). Only if the actual MIS execution (MCP or direct CLI runner) fails or refuses connection, report **`BLOCKED`** with the exact error text — NEVER substitute old `STATE.md` data as current live status.
    - **On-Demand Personal Context Policy:** Only update `context/` (`PROFILE.md`, `STATE.md`, `DECISIONS.md`, `directory.md`, `domain-overview.md`, `handoffs/`) when explicitly asked by the user or during explicit Pause Safely / refactor handoff. NEVER schedule or run periodic context syncs.
    - **No Blind Claims:** Cite only paths, line numbers, symbols, and test outputs directly observed via tool output.
 

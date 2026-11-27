@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createToolRegistry } from '../src/tools.mjs';
+import { runCli } from '../src/mcp-server.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -105,6 +106,7 @@ test('AGENTS.md respects size budget and declares poteto-mode routing and guardr
     '.agents/skills/mis-account-collector/SKILL.md',
     '.agents/skills/mis-project-ops/SKILL.md',
     '.agents/skills/verify-evidence/SKILL.md',
+    'node src/mcp-server.mjs',
     '/skill',
     'BLOCKED'
   ];
@@ -259,4 +261,51 @@ test('Transcript Read-Playbook-First audit catches unread and late-read playbook
   const [okValid, msgValid] = auditPlaybookReadBeforeExecution(validEvents, 'investigation.md');
   assert.equal(okValid, true);
   assert.ok(msgValid.startsWith('PASS:'));
+});
+
+test('Cross-harness CLI runner and checkin fallback contract work without mounted MCP', async () => {
+  const checkinRaw = fs.readFileSync(path.join(ROOT, '.agents', 'playbooks', 'checkin.md'), 'utf8');
+  assert.ok(checkinRaw.includes('node src/mcp-server.mjs mis_query_my_tasks --date_vn today'));
+  assert.ok(checkinRaw.includes('helper_unknown_error'));
+
+  const capturedCalls = [];
+  const baseRegistry = createToolRegistry({}, {});
+  const fakeServer = {
+    registry: {
+      tools: baseRegistry.tools,
+      async invoke(name, kwargs) {
+        capturedCalls.push({ name, kwargs });
+        return { tool: name, date_vn: kwargs.date_vn, status: 'VERIFIED' };
+      }
+    }
+  };
+
+  let outBuf = '';
+  let errBuf = '';
+  const rc = await runCli(
+    [
+      'mis_query_my_tasks',
+      '--date-vn',
+      '2026-11-28',
+      '--limit',
+      '10',
+      '--include-claimable'
+    ],
+    {
+      server: fakeServer,
+      stdout: { write: s => { outBuf += s; } },
+      stderr: { write: s => { errBuf += s; } }
+    }
+  );
+
+  assert.equal(rc, 0, `Unexpected stderr: ${errBuf}`);
+  const out = JSON.parse(outBuf);
+  assert.equal(out.tool, 'mis_query_my_tasks');
+  assert.equal(out.date_vn, '2026-11-28');
+  assert.equal(out.status, 'VERIFIED');
+  assert.equal(capturedCalls.length, 1);
+  assert.equal(capturedCalls[0].name, 'mis_query_my_tasks');
+  assert.equal(capturedCalls[0].kwargs.date_vn, '2026-11-28');
+  assert.equal(capturedCalls[0].kwargs.limit, 10);
+  assert.equal(capturedCalls[0].kwargs.include_claimable, true);
 });
